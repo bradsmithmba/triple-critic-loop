@@ -1,6 +1,6 @@
 ---
 name: triple-critic-loop
-description: Orchestrates a scored triple-critic design review. Launches three independent critics (Gemini, OpenAI, Claude adversarial), synthesizes and scores findings, applies eligible fixes, and repeats for the configured number of rounds. Returns a final report with severity curve, scoring summary, and deferred architectural reversals.
+description: "Orchestrates a scored triple-critic design review. Launches three independent critics (Gemini, OpenAI, Claude adversarial), synthesizes and scores findings, applies eligible fixes, and repeats for the configured number of rounds. Returns a final report with severity curve, scoring summary, and deferred architectural reversals. Data handling: documents under review are sent to external CLIs (Gemini, OpenAI/Codex); do not run this skill on documents containing credentials, PII, or data governed by residency requirements."
 disable-model-invocation: false
 ---
 
@@ -40,17 +40,34 @@ Score threshold at or above which a finding is deferred for discussion. Findings
 </input>
 
 <input name="PRIOR_FINDINGS" required="false">
-Cumulative list of findings addressed in prior rounds.
+Cumulative list of findings addressed in prior rounds. Each entry must conform to the following minimal schema (matching the essentials of critic_output_schema):
+- finding_id: unique identifier for the finding (string)
+- title: short descriptive title (string)
+- severity: critical | high | medium | low | info
+- action: the action taken (fold_in | defer | skip)
+- status: resolution status (applied | deferred | skipped)
 </input>
 </inputs>
 
 <invariants>
-Properties that must hold every round; reject the round and halt if any is violated.
+Properties that must hold every round. Invariants fall into two classes:
 
+HARD invariants: a violation immediately halts and reverts the current round. This does not conflict with complete_all_configured_rounds, which governs normal operation (no voluntary early exit); hard-failure halts are not voluntary exits.
+
+RECOVERABLE conditions: handled per their governing policy without halting the round (e.g., an external critic missing is resolved via external_critic_fallback).
+
+Hard invariants:
 - full_document_input: each critic sees the full target.
 - critic_isolation / no_cross_critic_visibility: critics run independently with no visibility into each other's output.
 - fixes_after_synthesis_only: no fix is applied before synthesis and scoring complete.
 - no_overlapping_edits: no two implementation_agents edit the same document section.
+- synthesis_must_complete: a round is not valid if synthesis is incomplete; halt and revert.
+- architectural_reversal_not_auto_applied: if an architectural_reversal was auto-applied, halt and revert the round.
+
+Recoverable conditions:
+- external_critic_unavailable: resolved via external_critic_fallback; does not halt.
+
+Operational invariants (govern normal execution, not failure handling):
 - no_user_intervention: no questions to the user between rounds.
 - complete_all_configured_rounds: run every configured round; do not early-exit.
 - claude_subagents_run_on_sonnet: per model_policy.
@@ -61,7 +78,7 @@ Per-round validation (all must be true):
 - every finding has a normalized_score and an action
 - eligible fixes filtered through fix_filter
 - no overlapping edit scopes
-- no architectural_reversal applied, and the loop was not stopped for one
+- no architectural_reversal was auto-applied
 </invariants>
 
 <architectural_reversal_policy>
@@ -99,6 +116,9 @@ Target and context:
 - When CONTEXT_PATHS is empty, each critic sees only the target (single-document
   isolation).
 
+Prior findings:
+- When PRIOR_FINDINGS is non-empty, each critic receives it as an "ALREADY_ADDRESSED" section in its prompt and must not re-raise a finding whose root cause and affected component match a PRIOR_FINDINGS entry, unless new evidence shows the prior fix was insufficient.
+
 Output:
 - Group findings by severity (critical, high, medium, low, info).
 - Each finding conforms to critic_output_schema.
@@ -110,22 +130,23 @@ Output:
 - Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
   CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so Gemini
   critiques only the target. When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
-  `{ echo "===== TARGET (critique this) ====="; cat {DOCUMENT_PATH}; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; cat {each CONTEXT_PATH}; } | ~/.local/bin/agy --print "<prompt>"`
-  When DOCUMENT_PATH is a directory, expand the target with `find {DOCUMENT_PATH} -type f \( -name '*.md' -o -name '*.txt' \) -print -exec cat {} \;`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
-- Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
+  `{ echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; cat {each CONTEXT_PATH}; } | timeout 120s ~/.local/bin/agy --print "<prompt>"`
+  When DOCUMENT_PATH is a directory, expand the target with `find "$DOCUMENT_PATH" -type f \( -name '*.md' -o -name '*.txt' \) -print -exec cat {} \;`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section. DOCUMENT_PATH must be quoted when interpolated into the Bash command.
+- Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
 - Return Gemini's response verbatim without summarizing or filtering.
 </critic>
 
 <critic id="openai" mode="external">
 - Runs via the external Codex CLI using the user's ChatGPT OAuth session; exempt from model_policy. Uses the user's codex default model (no -m override).
+- The orchestrator generates a fresh TMPFILE per critic invocation: `TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.txt)`
 - Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
   CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so the critic
   critiques only the target, and pipe it into codex exec as stdin (codex appends
   piped stdin as a <stdin> block). When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
-  `{ echo "===== TARGET (critique this) ====="; cat {DOCUMENT_PATH}; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; cat {each CONTEXT_PATH}; } | codex exec --skip-git-repo-check -s read-only --ephemeral --color never -o {TMPFILE} "<prompt>"`
+  `TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.txt); { echo "===== TARGET (critique this) ====="; cat {DOCUMENT_PATH}; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; cat {each CONTEXT_PATH}; } | timeout 120s codex exec --skip-git-repo-check -s read-only --ephemeral --color never -o "$TMPFILE" "<prompt>"`
   When DOCUMENT_PATH is a directory, expand the target with `find {DOCUMENT_PATH} -type f \( -name '*.md' -o -name '*.txt' \) -print -exec cat {} \;`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
 - Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
-- Read {TMPFILE} and return its contents verbatim without summarizing or filtering.
+- Read "$TMPFILE" and return its contents verbatim without summarizing or filtering, then delete "$TMPFILE".
 </critic>
 
 <critic id="claude_adversarial" mode="adversarial">
@@ -142,6 +163,7 @@ Focus:
 </agents>
 
 <external_critic_fallback>
+- An external critic "fails to launch or returns no usable output" when the command exits non-zero, produces empty output, times out, OR returns output that does not contain at least one finding conforming to critic_output_schema. Malformed external-critic output is treated as no usable output and triggers the fallback.
 - If an external critic (gemini or openai) fails to launch or returns no usable output in a round, substitute a Claude subagent on the Sonnet model for that critic's task in that round.
 - The fallback follows critic_protocol and takes the role of the critic it replaces: the openai fallback performs the balanced system-level critique (architecture, reliability, security, performance, scalability, operability); the gemini fallback performs a general severity-grouped critique.
 - The round still produces exactly three critic outputs; critic_count_per_round == 3 holds.
@@ -216,12 +238,12 @@ Priority thresholds:
 <deduplication>
 Rules:
 - Normalize finding titles by lowercasing, trimming whitespace, and stripping punctuation.
-- Merge findings when titles or evidence are semantically equivalent.
+- Two findings are mergeable if and only if they share the same root cause AND the same affected component or section. Title or evidence similarity alone is not sufficient; both conditions must hold.
 - Preserve all source critics on merged findings.
-- Preserve the strongest severity unless evidence supports a downgrade.
+- Severity of a merged finding is automatically set to max(severities) of all merged findings; no manual judgment is required.
 - Preserve the highest confidence unless merged evidence conflicts.
 - Combine recommendations only when they are compatible.
-- If recommendations conflict, preserve the conflict in synthesis and route unresolved conflict to deferred_discussion unless one resolution is clearly safer.
+- If recommendations conflict, preserve both recommendations in synthesis and route the conflict to deferred_discussion. Do not judge which recommendation is safer.
 </deduplication>
 
 <synthesis_model>
@@ -246,6 +268,7 @@ Priority order:
 
 2. If normalized_score >= HIGH_THRESHOLD AND severity IN [critical, high, medium]:
    - action: fold_in
+   - note: fix_filter is the single enforcement gate. The severity condition here mirrors fix_filter's severity gate; both must stay in sync. Any finding assigned fold_in that fix_filter subsequently rejects must be logged with an explicit rejection reason in round state and surfaced in the final report.
 
 3. If normalized_score >= LOW_THRESHOLD:
    - action: defer
@@ -259,6 +282,8 @@ Eligible fixes must satisfy all conditions:
 - action == fold_in
 - severity IN [critical, high, medium]
 - architectural_reversal == false
+
+Defense-in-depth note: the severity and architectural_reversal conditions above repeat guards already present in action_rules (rules 1 and 2). They are intentional defense-in-depth checks, not redundant dead code. If any finding assigned action=fold_in is rejected here, the orchestrator must log the rejection in round state with: finding_id, fix_filter_rejection_reason. That rejection must also be surfaced in the final report's scoring_summary under skipped/deferred rationale. Silent drops are not permitted.
 </fix_filter>
 
 <round_execution>
@@ -291,14 +316,24 @@ Instructions:
 </step_4_filter_fixes>
 
 <step_5_partition_fixes>
-- Partition fixes into balanced non-overlapping edit scopes.
-- No two implementation_agents may edit the same document section.
+Definition of "section": for a Markdown or XML-tagged document, a section is the content between two sibling anchors (a heading or top-level tag) at the same or higher level. For a Markdown document, sibling anchors are headings at the same heading depth; the section runs from one heading to the line before the next heading at equal or lesser depth. For an XML-tagged document, a section is a top-level element including its open and close tags.
+
+Partitioning rules:
+- Assign each eligible fix (by finding_id) to a line range: { finding_id, start_line, end_line } where start_line and end_line are 1-based line numbers in the target document at the time of partitioning.
+- The invariant: no two line ranges may overlap. Ranges [a, b] and [c, d] overlap if a <= d AND c <= b.
+- If a clean non-overlapping partition cannot be guaranteed (e.g., two fixes target the same section), serialize those fixes to a single implementation_agent that applies them sequentially rather than attempting parallel application.
+- Output the full mapping of finding_id to line range before launching any implementation_agent.
 </step_5_partition_fixes>
 
 <step_6_apply_fixes>
 - Launch every implementation_agent as a Claude subagent (model per model_policy).
-- Apply eligible fixes in parallel implementation_agents.
+- Apply eligible fixes in parallel implementation_agents, each restricted to its assigned line range from step_5_partition_fixes.
 - Each implementation_agent must report each fix changed and where.
+
+Post-apply check (run after all implementation_agents complete):
+- Verify that no two agents modified overlapping line ranges by comparing each agent's reported change ranges against the partition from step_5.
+- Verify that the document still parses structurally (well-formed XML if the document is XML-tagged; valid heading hierarchy if the document is Markdown).
+- If overlap is detected or structural parsing fails: halt the round, revert all changes applied in this step, and record the failure in round state and the final report. Do not proceed to step_7.
 </step_6_apply_fixes>
 
 <step_7_update_state>
