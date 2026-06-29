@@ -1,6 +1,6 @@
 ---
 name: triple-critic-loop
-description: Orchestrates a scored triple-critic design review. Launches three independent critics (Gemini, Claude balanced, Claude adversarial), synthesizes and scores findings, applies eligible fixes, and repeats for the configured number of rounds. Returns a final report with severity curve, scoring summary, and deferred architectural reversals.
+description: Orchestrates a scored triple-critic design review. Launches three independent critics (Gemini, OpenAI, Claude adversarial), synthesizes and scores findings, applies eligible fixes, and repeats for the configured number of rounds. Returns a final report with severity curve, scoring summary, and deferred architectural reversals.
 disable-model-invocation: false
 ---
 
@@ -79,9 +79,9 @@ Policy:
 </architectural_reversal_policy>
 
 <model_policy>
-- Launch every Claude subagent in this skill (both Claude critics and all implementation_agents) on the Sonnet model: claude-sonnet-4-6.
+- Launch every Claude subagent in this skill on the Sonnet model: claude-sonnet-4-6. This covers the claude_adversarial critic, all implementation_agents, and any Sonnet fallback critic substituted for a failed external critic (see external_critic_fallback).
 - This is explicit and not inherited: pass model "sonnet" (claude-sonnet-4-6) when launching each Claude subagent, regardless of the orchestrator's model or any default subagent-model configuration.
-- The gemini critic is exempt: it runs via the external Gemini CLI and is unaffected by Claude model selection.
+- The external critics (gemini, openai) are exempt: gemini runs via the Gemini CLI and openai via the Codex CLI, unaffected by Claude model selection.
 </model_policy>
 
 <critic_protocol>
@@ -90,7 +90,7 @@ Shared input/output contract for all three critics.
 Target and context:
 - Each critic reviews the full TARGET under DOCUMENT_PATH. If DOCUMENT_PATH is a
   directory, that means every document in it; if a file, that file. The Claude
-  critics read it via their tools; the gemini critic assembles it via Bash (below).
+  critic reads it via its tools; the gemini and openai critics assemble it via Bash (below).
 - If CONTEXT_PATHS is set, also take those paths as REFERENCE context, read-only:
   the authoritative design the target must conform to. Each CONTEXT_PATH may be a
   file or a directory. Critique ONLY the target; use the reference to judge
@@ -116,16 +116,16 @@ Output:
 - Return Gemini's response verbatim without summarizing or filtering.
 </critic>
 
-<critic id="claude_balanced" mode="balanced">
-- Launch as a Claude subagent. Follow critic_protocol.
-- Perform a balanced system-level critique. Return findings grouped by topic and severity.
-Focus:
-- architecture
-- reliability
-- security
-- performance
-- scalability
-- operability
+<critic id="openai" mode="external">
+- Runs via the external Codex CLI using the user's ChatGPT OAuth session; exempt from model_policy. Uses the user's codex default model (no -m override).
+- Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
+  CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so the critic
+  critiques only the target, and pipe it into codex exec as stdin (codex appends
+  piped stdin as a <stdin> block). When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
+  `{ echo "===== TARGET (critique this) ====="; cat {DOCUMENT_PATH}; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; cat {each CONTEXT_PATH}; } | codex exec --skip-git-repo-check -s read-only --ephemeral --color never -o {TMPFILE} "<prompt>"`
+  When DOCUMENT_PATH is a directory, expand the target with `find {DOCUMENT_PATH} -type f \( -name '*.md' -o -name '*.txt' \) -print -exec cat {} \;`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
+- Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
+- Read {TMPFILE} and return its contents verbatim without summarizing or filtering.
 </critic>
 
 <critic id="claude_adversarial" mode="adversarial">
@@ -140,6 +140,13 @@ Focus:
 - production_week_one_failures
 </critic>
 </agents>
+
+<external_critic_fallback>
+- If an external critic (gemini or openai) fails to launch or returns no usable output in a round, substitute a Claude subagent on the Sonnet model for that critic's task in that round.
+- The fallback follows critic_protocol and takes the role of the critic it replaces: the openai fallback performs the balanced system-level critique (architecture, reliability, security, performance, scalability, operability); the gemini fallback performs a general severity-grouped critique.
+- The round still produces exactly three critic outputs; critic_count_per_round == 3 holds.
+- Record each fallback substitution in round state and surface it in the final report.
+</external_critic_fallback>
 
 <critic_output_schema>
 Required fields:
@@ -168,7 +175,7 @@ Confidence scale:
 
 Critic weights:
 - gemini: 1.0
-- claude_balanced: 1.0
+- openai: 1.0
 - claude_adversarial: 1.0
 
 Agreement multipliers:
@@ -257,6 +264,7 @@ Eligible fixes must satisfy all conditions:
 <round_execution>
 <step_1_launch_critics>
 - Launch all critics in parallel.
+- If an external critic fails to launch or returns no usable output, apply external_critic_fallback.
 - Apply invariants.
 </step_1_launch_critics>
 

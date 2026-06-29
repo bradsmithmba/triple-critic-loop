@@ -8,8 +8,10 @@ Given a design document (or a directory of documents), the skill runs N review r
 
 1. Launches three independent critics in parallel:
    - **Gemini** (external, via the Gemini CLI)
-   - **Claude balanced** (system-level critique: architecture, reliability, security, performance, scalability, operability)
-   - **Claude adversarial** (assumes the design fails: race conditions, concurrency, security bypass, scale failure, hidden assumptions)
+   - **OpenAI** (external, via the Codex CLI on your ChatGPT OAuth session; balanced system-level critique: architecture, reliability, security, performance, scalability, operability)
+   - **Claude adversarial** (Claude subagent; assumes the design fails: race conditions, concurrency, security bypass, scale failure, hidden assumptions)
+
+   If an external critic fails to launch in a round, a Sonnet subagent is substituted for its task so every round still has three critics.
 2. Deduplicates and synthesizes findings, preserving disagreement between critics.
 3. Scores every finding (severity x confidence x critic weight x cross-critic agreement x impact weight).
 4. Auto-applies eligible fixes via parallel implementation agents on non-overlapping edit scopes.
@@ -39,17 +41,18 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `DOCUMENT_PATH` | yes | — | Absolute path to the document or directory under review. |
-| `CONTEXT_PATHS` | no | — | Comma-separated reference docs the target must stay consistent with (read-only context). |
+| `DOCUMENT_PATH` | yes | n/a | Absolute path to the document or directory under review. |
+| `CONTEXT_PATHS` | no | n/a | Comma-separated reference docs the target must stay consistent with (read-only context). |
 | `LOOPS` | no | `3` | Number of review rounds. |
 | `HIGH_THRESHOLD` | no | `50` | Normalized score (0-100) at or above which a finding is auto-applied. |
 | `LOW_THRESHOLD` | no | `33` | Normalized score at or above which a finding is deferred rather than skipped. |
-| `PRIOR_FINDINGS` | no | — | Cumulative findings carried in from prior rounds. |
+| `PRIOR_FINDINGS` | no | n/a | Cumulative findings carried in from prior rounds. |
 
 ## Dependencies
 
-- Claude Code with subagent support (Claude critics and implementation agents run on `claude-sonnet-4-6`).
-- The Gemini CLI for the external critic (`~/.local/bin/agy` in the current configuration).
+- Claude Code with subagent support (the adversarial critic, any fallback critics, and implementation agents run on `claude-sonnet-4-6`).
+- The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration).
+- The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model, no API key required. If Codex is not authenticated, that critic falls back to a Sonnet subagent each round.
 
 ## Layout
 
