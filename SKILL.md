@@ -32,11 +32,11 @@ Number of review cycles to execute.
 </input>
 
 <input name="HIGH_THRESHOLD" required="false" default="50">
-Normalized score threshold (0-100) at or above which a finding is eligible for automatic application (fold-in). Must be greater than LOW_THRESHOLD.
+Score threshold at or above which a finding is eligible for automatic application (fold-in). The score scale is open-topped: high-severity findings with full critic agreement can exceed 100. Must be greater than LOW_THRESHOLD.
 </input>
 
 <input name="LOW_THRESHOLD" required="false" default="33">
-Normalized score threshold (0-100) at or above which a finding is deferred for discussion. Findings below this threshold are skipped.
+Score threshold at or above which a finding is deferred for discussion. Findings below this threshold are skipped.
 </input>
 
 <input name="PRIOR_FINDINGS" required="false">
@@ -167,9 +167,9 @@ Confidence scale:
 - low: 0.4
 
 Critic weights:
-- gemini: 1.1
+- gemini: 1.0
 - claude_balanced: 1.0
-- claude_adversarial: 1.2
+- claude_adversarial: 1.0
 
 Agreement multipliers:
 - all_three_agree: 1.5
@@ -194,7 +194,11 @@ Formula inputs:
 
 Formula:
 - finding_score = severity_value * confidence_value * critic_weight_sum * agreement_multiplier * max_impact_weight
-- normalized_score = min(100, round(finding_score * 10, 1))
+- normalized_score = round(finding_score * 10, 1)
+
+Scale:
+- Scores are open-topped, not capped at 100. Critic agreement is counted twice by design: additively in critic_weight_sum (the sum grows with each agreeing critic) and multiplicatively in agreement_multiplier. A high-severity finding all three critics agree on can therefore exceed 100, reflecting compounded criticality, and ranks above lesser findings instead of flattening to a shared ceiling.
+- Thresholds (HIGH_THRESHOLD, LOW_THRESHOLD) are absolute cutoffs on this open scale.
 
 Priority thresholds:
 - auto_fold_in: HIGH_THRESHOLD (default: 50)
