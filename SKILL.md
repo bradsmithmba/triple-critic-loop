@@ -52,7 +52,7 @@ Cumulative list of findings addressed in prior rounds. Each entry must conform t
 <invariants>
 Properties that must hold every round. Invariants fall into two classes:
 
-HARD invariants: a violation immediately halts and reverts the current round. This does not conflict with complete_all_configured_rounds, which governs normal operation (no voluntary early exit); hard-failure halts are not voluntary exits.
+HARD invariants: a violation immediately halts and reverts the current round. This does not conflict with complete_rounds_or_converge, which governs normal operation (no voluntary early exit except convergence); hard-failure halts are not voluntary exits.
 
 RECOVERABLE conditions: handled per their governing policy without halting the round (e.g., an external critic missing is resolved via external_critic_fallback).
 
@@ -63,13 +63,14 @@ Hard invariants:
 - no_overlapping_edits: no two implementation_agents edit the same document section.
 - synthesis_must_complete: a round is not valid if synthesis is incomplete; halt and revert.
 - architectural_reversal_not_auto_applied: if an architectural_reversal was auto-applied, halt and revert the round.
+- both_externals_failed: if both external critics (gemini and openai) fail in the same round, abort the run as failed_loop and exit, rather than homogenizing to three Sonnet critics (see external_critic_fallback).
 
 Recoverable conditions:
 - external_critic_unavailable: resolved via external_critic_fallback; does not halt.
 
 Operational invariants (govern normal execution, not failure handling):
 - no_user_intervention: no questions to the user between rounds.
-- complete_all_configured_rounds: run every configured round; do not early-exit.
+- complete_rounds_or_converge: run up to LOOPS rounds; exit early only on convergence (a round that applies zero eligible fold_in fixes) or on a hard-failure halt. Do not exit early for any other reason.
 - claude_subagents_run_on_sonnet: per model_policy.
 
 Per-round validation (all must be true):
@@ -164,9 +165,10 @@ Focus:
 
 <external_critic_fallback>
 - An external critic "fails to launch or returns no usable output" when the command exits non-zero, produces empty output, times out, OR returns output that does not contain at least one finding conforming to critic_output_schema. Malformed external-critic output is treated as no usable output and triggers the fallback.
-- If an external critic (gemini or openai) fails to launch or returns no usable output in a round, substitute a Claude subagent on the Sonnet model for that critic's task in that round.
+- If exactly one external critic (gemini or openai) fails in a round, substitute a Claude subagent on the Sonnet model for that critic's task in that round.
 - The fallback follows critic_protocol and takes the role of the critic it replaces: the openai fallback performs the balanced system-level critique (architecture, reliability, security, performance, scalability, operability); the gemini fallback performs a general severity-grouped critique.
-- The round still produces exactly three critic outputs; critic_count_per_round == 3 holds.
+- At most one external critic may fall back per round. If BOTH external critics (gemini and openai) fail in the same round, all three critics would be the same Sonnet model and the agreement signal would be artificial. Do not substitute both: abort the run, mark it failed_loop, and exit. Surface the failed_loop and its cause in the final report. (See the both_externals_failed hard invariant.)
+- When at most one external critic falls back, the round still produces exactly three critic outputs and critic_count_per_round == 3 holds.
 - Record each fallback substitution in round state and surface it in the final report.
 </external_critic_fallback>
 
@@ -195,15 +197,10 @@ Confidence scale:
 - medium: 0.7
 - low: 0.4
 
-Critic weights:
-- gemini: 1.0
-- openai: 1.0
-- claude_adversarial: 1.0
-
-Agreement multipliers:
-- all_three_agree: 1.5
-- two_agents_agree: 1.25
-- one_agent: 1.0
+Agreement factor (the single lever for critic agreement; proportional to how many critics raised the finding):
+- all_three_agree: 3
+- two_agents_agree: 2
+- one_agent: 1
 
 Impact weights:
 - correctness: 1.3
@@ -217,16 +214,15 @@ Impact weights:
 Formula inputs:
 - severity_value
 - confidence_value
-- critic_weight_sum
-- agreement_multiplier
+- agreement_factor
 - max_impact_weight
 
 Formula:
-- finding_score = severity_value * confidence_value * critic_weight_sum * agreement_multiplier * max_impact_weight
+- finding_score = severity_value * confidence_value * agreement_factor * max_impact_weight
 - normalized_score = round(finding_score * 10, 1)
 
 Scale:
-- Scores are open-topped, not capped at 100. Critic agreement is counted twice by design: additively in critic_weight_sum (the sum grows with each agreeing critic) and multiplicatively in agreement_multiplier. A high-severity finding all three critics agree on can therefore exceed 100, reflecting compounded criticality, and ranks above lesser findings instead of flattening to a shared ceiling.
+- Scores are open-topped, not capped at 100. Critic agreement is the single priority lever, applied once via agreement_factor (1, 2, or 3 for one, two, or three agreeing critics). A high-severity finding all three critics agree on can therefore exceed 100, ranking above lesser findings instead of flattening to a shared ceiling. There is no separate critic-weight term: all critics are weighted equally, so agreement_factor alone carries critic count.
 - Thresholds (HIGH_THRESHOLD, LOW_THRESHOLD) are absolute cutoffs on this open scale.
 
 Priority thresholds:
@@ -347,7 +343,9 @@ State updates:
 </round_execution>
 
 <loop_control>
-- Repeat round_execution for LOOPS iterations.
+- Repeat round_execution for up to LOOPS iterations.
+- Convergence early-exit: after any round in which zero eligible fold_in fixes were applied, the document has converged. Stop the loop early and set the run outcome to converged_early.
+- Failed-loop exit: if both external critics fail in a round (both_externals_failed), abort the run and set the run outcome to failed_loop.
 - Do not ask the user questions between rounds.
 - Do not stop when an architectural reversal is found.
 - Surface deferred discussion items only in the final report.
@@ -355,6 +353,7 @@ State updates:
 
 <final_report>
 Required sections:
+- run_outcome
 - findings_by_severity
 - findings_by_score
 - applied_changes_by_round
@@ -365,6 +364,7 @@ Required sections:
 - next_steps
 
 Rules:
+- run_outcome must state one of: completed_all_rounds, converged_early, failed_loop; the round it exited on; and the reason (for failed_loop, which external critics failed).
 - findings_by_severity must include severity, source critics, normalized score, action, and status.
 - findings_by_score must sort findings by normalized_score descending.
 - applied_changes_by_round must include round, finding ID, fix summary, and affected document section.
