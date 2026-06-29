@@ -9,7 +9,6 @@ disable-model-invocation: false
 - You launch subagents to execute the work rather than doing it yourself in order to preserve your context window.
 - You launch three independent critics, synthesize and score findings, launch implementation agents to apply eligible fixes, and repeat for the configured number of rounds.
 - Run all rounds to completion.
-- Do not stop mid-loop for architectural reversals.
 </role_definition>
 
 <inputs>
@@ -46,14 +45,23 @@ Cumulative list of findings addressed in prior rounds.
 </inputs>
 
 <invariants>
-- full_document_input: true
-- critic_isolation: true
-- no_cross_critic_visibility: true
-- fixes_after_synthesis_only: true
-- no_overlapping_edits: true
-- no_user_intervention: true
-- complete_all_configured_rounds: true
-- claude_subagents_run_on_sonnet: true
+Properties that must hold every round; reject the round and halt if any is violated.
+
+- full_document_input: each critic sees the full target.
+- critic_isolation / no_cross_critic_visibility: critics run independently with no visibility into each other's output.
+- fixes_after_synthesis_only: no fix is applied before synthesis and scoring complete.
+- no_overlapping_edits: no two implementation_agents edit the same document section.
+- no_user_intervention: no questions to the user between rounds.
+- complete_all_configured_rounds: run every configured round; do not early-exit.
+- claude_subagents_run_on_sonnet: per model_policy.
+
+Per-round validation (all must be true):
+- critic_count_per_round == 3
+- synthesis_complete
+- every finding has a normalized_score and an action
+- eligible fixes filtered through fix_filter
+- no overlapping edit scopes
+- no architectural_reversal applied, and the loop was not stopped for one
 </invariants>
 
 <architectural_reversal_policy>
@@ -76,31 +84,41 @@ Policy:
 - The gemini critic is exempt: it runs via the external Gemini CLI and is unaffected by Claude model selection.
 </model_policy>
 
+<critic_protocol>
+Shared input/output contract for all three critics.
+
+Target and context:
+- Each critic reviews the full TARGET under DOCUMENT_PATH. If DOCUMENT_PATH is a
+  directory, that means every document in it; if a file, that file. The Claude
+  critics read it via their tools; the gemini critic assembles it via Bash (below).
+- If CONTEXT_PATHS is set, also take those paths as REFERENCE context, read-only:
+  the authoritative design the target must conform to. Each CONTEXT_PATH may be a
+  file or a directory. Critique ONLY the target; use the reference to judge
+  consistency, completeness, and contradiction, and raise findings against the
+  target where it contradicts or omits something the reference requires.
+- When CONTEXT_PATHS is empty, each critic sees only the target (single-document
+  isolation).
+
+Output:
+- Group findings by severity (critical, high, medium, low, info).
+- Each finding conforms to critic_output_schema.
+</critic_protocol>
+
 <agents>
 <critic id="gemini" mode="external">
-Instructions:
-- Read the full document under review. If DOCUMENT_PATH is a directory, read every
-  document in it; if it is a file, read that file.
-- Assemble the payload: the TARGET content (the document(s) under DOCUMENT_PATH),
-  then, if CONTEXT_PATHS is set, the REFERENCE content from those paths, with a
-  clear separator between the two sections so Gemini critiques only the target.
-  Build it with Bash, e.g. when DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
+- Runs via the external Gemini CLI; exempt from model_policy.
+- Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
+  CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so Gemini
+  critiques only the target. When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
   `{ echo "===== TARGET (critique this) ====="; cat {DOCUMENT_PATH}; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; cat {each CONTEXT_PATH}; } | ~/.local/bin/agy --print "<prompt>"`
-  When DOCUMENT_PATH is a directory, expand the target with e.g. `find {DOCUMENT_PATH} -type f \( -name '*.md' -o -name '*.txt' \) -print -exec cat {} \;` so each target file's path and content are included. Each CONTEXT_PATH may itself be a file (cat it) or a directory (expand it with the same find pattern). When CONTEXT_PATHS is empty, include only the TARGET section (unchanged behavior).
-- Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with — raise findings against the target only, including where the target contradicts or omits something the reference requires. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
+  When DOCUMENT_PATH is a directory, expand the target with `find {DOCUMENT_PATH} -type f \( -name '*.md' -o -name '*.txt' \) -print -exec cat {} \;`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
+- Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
 - Return Gemini's response verbatim without summarizing or filtering.
 </critic>
 
 <critic id="claude_balanced" mode="balanced">
-Instructions:
-- Launch as a Claude subagent on the Sonnet model (model "sonnet", claude-sonnet-4-6).
-- Read the full document under review (every file if DOCUMENT_PATH is a directory).
-- If CONTEXT_PATHS is set, also read those reference documents read-only as the
-  authoritative design context the target must conform to; critique ONLY the
-  target, but use the context to judge consistency, completeness, and contradiction.
-- Perform a balanced system-level critique.
-- Return findings grouped by topic and severity.
-
+- Launch as a Claude subagent. Follow critic_protocol.
+- Perform a balanced system-level critique. Return findings grouped by topic and severity.
 Focus:
 - architecture
 - reliability
@@ -111,17 +129,8 @@ Focus:
 </critic>
 
 <critic id="claude_adversarial" mode="adversarial">
-Instructions:
-- Launch as a Claude subagent on the Sonnet model (model "sonnet", claude-sonnet-4-6).
-- Read the full document under review (every file if DOCUMENT_PATH is a directory).
-- If CONTEXT_PATHS is set, also read those reference documents read-only as the
-  authoritative design context; critique ONLY the target, but use the context to
-  attack inconsistencies, unmet contracts, and assumptions the target makes about
-  the rest of the system.
-- Assume the design will fail.
-- Challenge every mitigation until proven sufficient.
-- Do not soften findings.
-
+- Launch as a Claude subagent. Follow critic_protocol.
+- Assume the design will fail. Challenge every mitigation until proven sufficient. Do not soften findings.
 Focus:
 - race_conditions
 - concurrency_failure_modes
@@ -217,18 +226,6 @@ Rules:
 - Do not drop unique findings.
 </synthesis_model>
 
-<decision_pipeline>
-1. Synthesize and deduplicate critic findings.
-2. Assign agreement class.
-3. Score every finding.
-4. Assign action using action_rules.
-5. Filter eligible fixes using fix_filter.
-6. Partition eligible fixes into non-overlapping edit scopes.
-7. Apply eligible fixes through implementation_agents.
-8. Update state.
-9. Continue to the next round until LOOPS is complete.
-</decision_pipeline>
-
 <action_rules>
 Priority order:
 
@@ -275,7 +272,6 @@ Instructions:
 - Apply scoring_model to every synthesized finding.
 - Assign normalized_score to every finding.
 - Assign action using action_rules.
-- Architectural reversals must always be assigned action=defer.
 </step_3_score_findings>
 
 <step_4_filter_fixes>
@@ -288,7 +284,7 @@ Instructions:
 </step_5_partition_fixes>
 
 <step_6_apply_fixes>
-- Launch every implementation_agent as a Claude subagent on the Sonnet model (model "sonnet", claude-sonnet-4-6).
+- Launch every implementation_agent as a Claude subagent (model per model_policy).
 - Apply eligible fixes in parallel implementation_agents.
 - Each implementation_agent must report each fix changed and where.
 </step_6_apply_fixes>
@@ -309,26 +305,6 @@ State updates:
 - Do not stop when an architectural reversal is found.
 - Surface deferred discussion items only in the final report.
 </loop_control>
-
-<validation>
-Required per round:
-- critic_outputs == 3
-- synthesis_complete == true
-- findings_count >= 0
-- every_finding_has_score == true
-- every_finding_has_action == true
-- eligible_fixes_filtered == true
-- overlapping_edit_scopes == false
-- architectural_reversal_applied == false
-
-Reject if:
-- architectural_reversal_applied == true
-- loop_stopped_for_architectural_reversal == true
-- critic_count_per_round != 3
-- any_finding_missing_score == true
-- any_finding_missing_action == true
-- overlapping_edit_scopes == true
-</validation>
 
 <final_report>
 Required sections:
