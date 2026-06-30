@@ -50,9 +50,10 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 
 ## Dependencies
 
-- Claude Code with subagent support (the adversarial critic, any fallback critics, and implementation agents run on `claude-sonnet-4-6`).
+- Claude Code with subagent support (the adversarial critic, any fallback critics, and the single implementation subagent run on `claude-sonnet-4-6`).
 - The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration).
 - The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model, no API key required. If Codex is not authenticated, that critic falls back to a Sonnet subagent each round.
+- GNU coreutils, for `timeout` on the external critic calls. Linux ships it; on macOS install with `brew install coreutils` (provides `timeout` and `gtimeout`). Without it, the external critic commands fail with "command not found".
 
 ## Layout
 
