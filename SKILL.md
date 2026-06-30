@@ -6,9 +6,10 @@ disable-model-invocation: false
 
 <role_definition>
 - You are the orchestrator of a scored triple-critic design review workflow.
-- You launch subagents to execute the work rather than doing it yourself in order to preserve your context window.
-- You launch three independent critics, synthesize and score findings, launch implementation agents to apply eligible fixes, and repeat for the configured number of rounds.
-- Run all rounds to completion.
+- Each round you launch three independent critics as subagents. They analyze and report their findings back to you; they never edit the document.
+- You gather the critic results, synthesize and rank (score) them, and decide which changes to apply.
+- You then launch a SINGLE new implementation subagent that applies all the decided changes. That single apply-agent is the only writer; you do not launch multiple parallel apply-agents, and you do not edit the document in the orchestrator yourself.
+- Repeat for the configured number of rounds. Run all rounds to completion.
 </role_definition>
 
 <inputs>
@@ -60,7 +61,7 @@ Hard invariants:
 - full_document_input: each critic sees the full target.
 - critic_isolation / no_cross_critic_visibility: critics run independently with no visibility into each other's output.
 - fixes_after_synthesis_only: no fix is applied before synthesis and scoring complete.
-- no_overlapping_edits: no two implementation_agents edit the same document section.
+- single_apply_agent: exactly one implementation subagent applies the changes each round; critics never edit, and no parallel apply-agents run, so concurrent edits are impossible.
 - synthesis_must_complete: a round is not valid if synthesis is incomplete; halt and revert.
 - architectural_reversal_not_auto_applied: if an architectural_reversal was auto-applied, halt and revert the round.
 - both_externals_failed: if both external critics (gemini and openai) fail in the same round, abort the run as failed_loop and exit, rather than homogenizing to three Sonnet critics (see external_critic_fallback).
@@ -78,7 +79,7 @@ Per-round validation (all must be true):
 - synthesis_complete
 - every finding has a normalized_score and an action
 - eligible fixes filtered through fix_filter
-- no overlapping edit scopes
+- changes applied by exactly one implementation subagent
 - no architectural_reversal was auto-applied
 </invariants>
 
@@ -97,7 +98,7 @@ Policy:
 </architectural_reversal_policy>
 
 <model_policy>
-- Launch every Claude subagent in this skill on the Sonnet model: claude-sonnet-4-6. This covers the claude_adversarial critic, all implementation_agents, and any Sonnet fallback critic substituted for a failed external critic (see external_critic_fallback).
+- Launch every Claude subagent in this skill on the Sonnet model: claude-sonnet-4-6. This covers the claude_adversarial critic, the single implementation subagent that applies changes, and any Sonnet fallback critic substituted for a failed external critic (see external_critic_fallback).
 - This is explicit and not inherited: pass model "sonnet" (claude-sonnet-4-6) when launching each Claude subagent, regardless of the orchestrator's model or any default subagent-model configuration.
 - The external critics (gemini, openai) are exempt: gemini runs via the Gemini CLI and openai via the Codex CLI, unaffected by Claude model selection.
 </model_policy>
@@ -128,24 +129,26 @@ Output:
 <agents>
 <critic id="gemini" mode="external">
 - Runs via the external Gemini CLI; exempt from model_policy.
+- Path validation (shared by both external critics): every DOCUMENT_PATH and CONTEXT_PATH must be an absolute path and must be rejected before any Bash command is constructed if it contains shell metacharacters or newlines.
 - Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
   CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so Gemini
   critiques only the target. When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
-  `{ echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; cat {each CONTEXT_PATH}; } | timeout 120s ~/.local/bin/agy --print "<prompt>"`
-  When DOCUMENT_PATH is a directory, expand the target with `find "$DOCUMENT_PATH" -type f \( -name '*.md' -o -name '*.txt' \) -print -exec cat {} \;`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section. DOCUMENT_PATH must be quoted when interpolated into the Bash command.
+  `{ echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; for p in "${CONTEXT_PATHS[@]}"; do cat "$p"; done; } | timeout 120s ~/.local/bin/agy --print "<prompt>"`
+  When DOCUMENT_PATH is a directory, expand the target with `find "$DOCUMENT_PATH" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | xargs -0 cat`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
 - Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
 - Return Gemini's response verbatim without summarizing or filtering.
 </critic>
 
 <critic id="openai" mode="external">
 - Runs via the external Codex CLI using the user's ChatGPT OAuth session; exempt from model_policy. Uses the user's codex default model (no -m override).
-- The orchestrator generates a fresh TMPFILE per critic invocation: `TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.txt)`
+- Path validation: see the shared note in the gemini critic above.
+- The orchestrator generates a fresh TMPFILE per critic invocation: `TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.txt); trap 'rm -f "$TMPFILE"' EXIT; chmod 600 "$TMPFILE"`
 - Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
   CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so the critic
   critiques only the target, and pipe it into codex exec as stdin (codex appends
   piped stdin as a <stdin> block). When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
-  `TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.txt); { echo "===== TARGET (critique this) ====="; cat {DOCUMENT_PATH}; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; cat {each CONTEXT_PATH}; } | timeout 120s codex exec --skip-git-repo-check -s read-only --ephemeral --color never -o "$TMPFILE" "<prompt>"`
-  When DOCUMENT_PATH is a directory, expand the target with `find {DOCUMENT_PATH} -type f \( -name '*.md' -o -name '*.txt' \) -print -exec cat {} \;`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
+  `{ echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; for p in "${CONTEXT_PATHS[@]}"; do cat "$p"; done; } | timeout 120s codex exec --skip-git-repo-check -s read-only --ephemeral --color never -o "$TMPFILE" "<prompt>"`
+  When DOCUMENT_PATH is a directory, expand the target with `find "$DOCUMENT_PATH" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | xargs -0 cat`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
 - Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
 - Read "$TMPFILE" and return its contents verbatim without summarizing or filtering, then delete "$TMPFILE".
 </critic>
@@ -262,14 +265,18 @@ Priority order:
    - action: defer
    - reason: architectural reversals are never auto-applied
 
-2. If normalized_score >= HIGH_THRESHOLD AND severity IN [critical, high, medium]:
+2. If conflicting_recommendations == true (merged finding whose recommendations were preserved as conflicting per deduplication rules):
+   - action: defer
+   - reason: conflicting recommendations cannot be safely reduced to a single instruction for an implementation agent; defer for human resolution regardless of score
+
+3. If normalized_score >= HIGH_THRESHOLD AND severity IN [critical, high, medium]:
    - action: fold_in
    - note: fix_filter is the single enforcement gate. The severity condition here mirrors fix_filter's severity gate; both must stay in sync. Any finding assigned fold_in that fix_filter subsequently rejects must be logged with an explicit rejection reason in round state and surfaced in the final report.
 
-3. If normalized_score >= LOW_THRESHOLD:
+4. If normalized_score >= LOW_THRESHOLD:
    - action: defer
 
-4. Default:
+5. Default:
    - action: skip
 </action_rules>
 
@@ -311,25 +318,23 @@ Instructions:
 - Apply fix_filter.
 </step_4_filter_fixes>
 
-<step_5_partition_fixes>
-Definition of "section": for a Markdown or XML-tagged document, a section is the content between two sibling anchors (a heading or top-level tag) at the same or higher level. For a Markdown document, sibling anchors are headings at the same heading depth; the section runs from one heading to the line before the next heading at equal or lesser depth. For an XML-tagged document, a section is a top-level element including its open and close tags.
-
-Partitioning rules:
-- Assign each eligible fix (by finding_id) to a line range: { finding_id, start_line, end_line } where start_line and end_line are 1-based line numbers in the target document at the time of partitioning.
-- The invariant: no two line ranges may overlap. Ranges [a, b] and [c, d] overlap if a <= d AND c <= b.
-- If a clean non-overlapping partition cannot be guaranteed (e.g., two fixes target the same section), serialize those fixes to a single implementation_agent that applies them sequentially rather than attempting parallel application.
-- Output the full mapping of finding_id to line range before launching any implementation_agent.
-</step_5_partition_fixes>
+<step_5_assemble_change_set>
+- Assemble the ordered change set for the single implementation subagent: the list of eligible fixes, each with finding_id, the exact change to make, where it applies, and the recommended edit.
+- There is no partitioning across agents and no parallel application: one implementation subagent applies the whole change set sequentially in step_6.
+- Order the fixes so they apply without coordinate drift (for example, bottom of the document first), or instruct the apply-agent to re-locate each fix by content match immediately before editing.
+</step_5_assemble_change_set>
 
 <step_6_apply_fixes>
-- Launch every implementation_agent as a Claude subagent (model per model_policy).
-- Apply eligible fixes in parallel implementation_agents, each restricted to its assigned line range from step_5_partition_fixes.
-- Each implementation_agent must report each fix changed and where.
+Snapshot: before launching the implementation subagent, the orchestrator snapshots the full target document content to a temp path (e.g., a mktemp file), so the round can be reverted. On any halt condition below, restore the snapshot by overwriting the target with the snapshot content, then delete the temp file.
 
-Post-apply check (run after all implementation_agents complete):
-- Verify that no two agents modified overlapping line ranges by comparing each agent's reported change ranges against the partition from step_5.
-- Verify that the document still parses structurally (well-formed XML if the document is XML-tagged; valid heading hierarchy if the document is Markdown).
-- If overlap is detected or structural parsing fails: halt the round, revert all changes applied in this step, and record the failure in round state and the final report. Do not proceed to step_7.
+- Launch a SINGLE implementation subagent as a Claude subagent (model per model_policy), with clear context: the assembled change set from step_5 and the target path. Do not launch more than one apply-agent, and do not edit the document in the orchestrator yourself.
+- The implementation subagent applies every fix in the change set sequentially, re-reading the affected region before each edit so each edit is made against the current document state, not a stale view.
+- The implementation subagent reports each fix applied and where.
+
+Post-apply check (after the implementation subagent completes):
+- Verify the document still parses structurally (well-formed XML if the document is XML-tagged; consistent heading structure if the document is Markdown).
+- If structural parsing fails: halt the round, restore the snapshot to revert all changes from this step, record the failure in round state and the final report (run_outcome halted_on_invariant), and do not proceed to step_7.
+- On success, delete the snapshot temp file.
 </step_6_apply_fixes>
 
 <step_7_update_state>
@@ -344,7 +349,8 @@ State updates:
 
 <loop_control>
 - Repeat round_execution for up to LOOPS iterations.
-- Convergence early-exit: after any round in which zero eligible fold_in fixes were applied, the document has converged. Stop the loop early and set the run outcome to converged_early.
+- Convergence early-exit: after any round in which zero eligible fold_in fixes were applied AND no critical or high severity findings remain deferred, the document has converged. Stop the loop early and set the run outcome to converged_early.
+- Stall exit: after any round in which zero eligible fold_in fixes were applied BUT one or more critical or high severity findings remain deferred (due to architectural_reversal, conflicting_recommendations, or any other deferral cause), stop the loop and set the run outcome to stalled_no_actionable_fixes. This is a stall, not convergence: high-severity issues remain unresolved but cannot be auto-applied.
 - Failed-loop exit: if both external critics fail in a round (both_externals_failed), abort the run and set the run outcome to failed_loop.
 - Do not ask the user questions between rounds.
 - Do not stop when an architectural reversal is found.
@@ -364,7 +370,7 @@ Required sections:
 - next_steps
 
 Rules:
-- run_outcome must state one of: completed_all_rounds, converged_early, failed_loop; the round it exited on; and the reason (for failed_loop, which external critics failed).
+- run_outcome must state one of: completed_all_rounds, converged_early, stalled_no_actionable_fixes, halted_on_invariant, failed_loop. For converged_early: state the round convergence was detected. For stalled_no_actionable_fixes: state the round the stall was detected and list the deferred critical/high findings that blocked auto-application. For halted_on_invariant: state the round, the invariant violated, and whether the round was reverted. For failed_loop: state the round and which external critics failed.
 - findings_by_severity must include severity, source critics, normalized score, action, and status.
 - findings_by_score must sort findings by normalized_score descending.
 - applied_changes_by_round must include round, finding ID, fix summary, and affected document section.
