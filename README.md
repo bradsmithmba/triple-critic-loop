@@ -13,13 +13,13 @@ Given a design document (or a directory of documents), the skill runs N review r
    - **OpenAI** (external, via the Codex CLI on your ChatGPT OAuth session; balanced system-level critique: architecture, reliability, security, performance, scalability, operability)
    - **Claude adversarial** (Claude subagent; assumes the design fails: race conditions, concurrency, security bypass, scale failure, hidden assumptions)
 
-   If an external critic fails to launch in a round, a Sonnet subagent is substituted for its task so every round still has three critics.
+   If one external critic fails to launch in a round, a Sonnet subagent is substituted for its task so every round still has three critics. If both external critics fail in the same round, the run stops as a failed loop.
 2. Deduplicates and synthesizes findings, preserving disagreement between critics.
-3. Scores every finding (severity x confidence x critic weight x cross-critic agreement x impact weight).
-4. Auto-applies eligible fixes via parallel implementation agents on non-overlapping edit scopes.
+3. Scores every finding (severity x confidence x agreement factor x impact weight); the agreement factor grows with the number of critics that raised the finding.
+4. Auto-applies eligible fixes: the orchestrator decides the change set, then a single implementation subagent applies it sequentially (the critics never edit).
 5. Defers architectural reversals instead of applying them.
 
-It returns a final report: findings by severity and score, applied changes per round, a severity curve across rounds, a scoring summary, and deferred architectural reversals.
+The loop stops early if a round applies no fixes and no critical or high findings remain (convergence). It returns a final report: the run outcome (completed, converged early, stalled, or failed), findings by severity and score, applied changes per round, a severity curve across rounds, a scoring summary, and deferred architectural reversals.
 
 ## Install
 
@@ -45,9 +45,9 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 |-------|----------|---------|-------------|
 | `DOCUMENT_PATH` | yes | n/a | Absolute path to the document or directory under review. |
 | `CONTEXT_PATHS` | no | n/a | Comma-separated reference docs the target must stay consistent with (read-only context). |
-| `LOOPS` | no | `3` | Number of review rounds. |
-| `HIGH_THRESHOLD` | no | `50` | Normalized score (0-100) at or above which a finding is auto-applied. |
-| `LOW_THRESHOLD` | no | `33` | Normalized score at or above which a finding is deferred rather than skipped. |
+| `LOOPS` | no | `3` | Maximum number of review rounds; the loop may stop early on convergence. |
+| `HIGH_THRESHOLD` | no | `50` | Score at or above which an eligible finding is auto-applied. The scale is open-topped and can exceed 100 when critics agree. |
+| `LOW_THRESHOLD` | no | `33` | Score at or above which a finding is deferred rather than skipped. |
 | `PRIOR_FINDINGS` | no | n/a | Cumulative findings carried in from prior rounds. |
 
 ## Dependencies
