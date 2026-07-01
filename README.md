@@ -59,7 +59,14 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 
 ```
 triple-critic-loop/
-├── SKILL.md     # the skill definition
+├── SKILL.md            # the skill definition (canonical)
+├── versions/
+│   └── 1.0/SKILL.md    # originally published skill, preserved
 ├── README.md
+├── LICENSE
 └── .gitignore
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
