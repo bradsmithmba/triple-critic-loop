@@ -1,6 +1,8 @@
 # triple-critic-loop
 
-A Claude Code skill that orchestrates a scored, multi-round design review using three independent critics.
+The three main frontier models each have their own strengths and weaknesses. I started off using them to check and improve each other's work, but manually copying pasting things back and forth so often was more than a little inefficient. I was tired of being the glue that held multiple models together. It seemed like I should be making them do all the work instead of me running back and forth between them. This loop is a result of that need.
+
+This loop has an orchestrator that launches three sub agents with clean context, one each from Gemini, Chad GPT, and one from Anthropic that is said to be adversarial. These three agents acts act as critics to review whatever document or code you send to them. They very often have very different perspectives and having those different perspectives makes this loop much better at finding problems. The three agents report their findings back to the orchestrator. The orchestrator, which has all the relevant context, then ranks And scores these potential changes. based on thresholds you set, the orchestror then launched an agent to apply the fixes. This preserves the main orchestrators context window. The loop then repeats three times or as many as you tell it to.
 
 ## What it does
 
