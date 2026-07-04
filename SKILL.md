@@ -9,7 +9,7 @@ disable-model-invocation: false
 - Each round you launch three independent critics as subagents. They analyze and report their findings back to you; they never edit the document.
 - You gather the critic results, synthesize and rank (score) them, and decide which changes to apply.
 - You then launch a SINGLE new implementation subagent that applies all the decided changes. That single apply-agent is the only writer; you do not launch multiple parallel apply-agents, and you do not edit the document in the orchestrator yourself.
-- Repeat for the configured number of rounds. Run all rounds to completion.
+- Repeat for up to the configured number of rounds. Exit early only per loop_control (convergence, stall, or failed loop); never exit early for any other reason.
 </role_definition>
 
 <inputs>
@@ -29,7 +29,9 @@ target document (single-document isolation, as before).
 </input>
 
 <input name="LOOPS" required="false" default="3">
-Number of review cycles to execute.
+Number of review cycles to execute. Must be an integer >= 1.
+
+Input validation (applies to all inputs): before launching any critics, validate that LOOPS >= 1 and HIGH_THRESHOLD > LOW_THRESHOLD >= 0. If any check fails, abort with a clear error; do not start the loop.
 </input>
 
 <input name="HIGH_THRESHOLD" required="false" default="50">
@@ -47,13 +49,17 @@ Cumulative list of findings addressed in prior rounds. Each entry must conform t
 - severity: critical | high | medium | low | info
 - action: the action taken (fold_in | defer | skip)
 - status: resolution status (applied | deferred | skipped)
+- root_cause: short phrase naming the underlying defect (string)
+- affected_component: the document section or component the finding was raised against (string)
+
+root_cause and affected_component are the keys critics use for the ALREADY_ADDRESSED match in critic_protocol; the orchestrator populates them from its synthesis (deduplication already establishes both) when updating state in step_7.
 </input>
 </inputs>
 
 <invariants>
 Properties that must hold every round. Invariants fall into two classes:
 
-HARD invariants: a violation immediately halts and reverts the current round. This does not conflict with complete_rounds_or_converge, which governs normal operation (no voluntary early exit except convergence); hard-failure halts are not voluntary exits.
+HARD invariants: a violation immediately halts and reverts the current round. This does not conflict with complete_rounds_or_converge, which governs normal operation (no voluntary early exit except the exit conditions defined in loop_control); hard-failure halts are not voluntary exits.
 
 RECOVERABLE conditions: handled per their governing policy without halting the round (e.g., an external critic missing is resolved via external_critic_fallback).
 
@@ -71,7 +77,7 @@ Recoverable conditions:
 
 Operational invariants (govern normal execution, not failure handling):
 - no_user_intervention: no questions to the user between rounds.
-- complete_rounds_or_converge: run up to LOOPS rounds; exit early only on convergence (a round that applies zero eligible fold_in fixes) or on a hard-failure halt. Do not exit early for any other reason.
+- complete_rounds_or_converge: run up to LOOPS rounds; exit early only on an exit condition defined in loop_control (convergence, stall, failed loop) or on a hard-failure halt. Do not exit early for any other reason. loop_control is the single source of truth for the exit conditions; do not restate them here.
 - claude_subagents_run_on_sonnet: per model_policy.
 
 Per-round validation (all must be true):
@@ -133,24 +139,26 @@ Output:
 - Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
   CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so Gemini
   critiques only the target. When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
-  `{ echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; for p in "${CONTEXT_PATHS[@]}"; do cat "$p"; done; } | timeout 120s ~/.local/bin/agy --print "<prompt>"`
-  When DOCUMENT_PATH is a directory, expand the target with `find "$DOCUMENT_PATH" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | xargs -0 cat`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
+  `IFS=',' read -ra CTX <<< "$CONTEXT_PATHS"; { echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; for p in "${CTX[@]}"; do cat "$p"; done; } | timeout 120s ~/.local/bin/agy --print "<prompt>"`
+  When DOCUMENT_PATH is a directory, expand the target with a null-safe loop that labels each file so findings remain locatable: `find "$DOCUMENT_PATH" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | while IFS= read -r -d '' f; do echo "----- FILE: $f -----"; cat "$f"; done`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
 - Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
 - Return Gemini's response verbatim without summarizing or filtering.
+- Artifact handling: some Gemini CLI variants return a prose summary inline and write the detailed structured findings to a local artifact file referenced in the response. If the response references such a file path, read that file and append its contents to the returned output BEFORE the usability check in external_critic_fallback is applied, so a valid review is not mistaken for a failure.
 </critic>
 
 <critic id="openai" mode="external">
 - Runs via the external Codex CLI using the user's ChatGPT OAuth session; exempt from model_policy. Uses the user's codex default model (no -m override).
 - Path validation: see the shared note in the gemini critic above.
-- The orchestrator generates a fresh TMPFILE per critic invocation: `TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.txt); trap 'rm -f "$TMPFILE"' EXIT; chmod 600 "$TMPFILE"`
+- The orchestrator generates a fresh TMPFILE per critic invocation: `TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.txt)`
+- Single-shell rule: the mktemp, the codex exec pipe, and the read of "$TMPFILE" must all run in ONE shell invocation. Do not split them across separate Bash calls: a `trap 'rm -f "$TMPFILE"' EXIT` fires when its shell exits, so in a split execution it would delete the codex output before the read, making every successful run look like an empty output and falsely triggering the fallback. Within that single invocation, set the trap immediately after mktemp so the file is cleaned up on any exit path (timeout, crash, or normal completion after the read).
 - Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
   CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so the critic
   critiques only the target, and pipe it into codex exec as stdin (codex appends
   piped stdin as a <stdin> block). When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
-  `{ echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; for p in "${CONTEXT_PATHS[@]}"; do cat "$p"; done; } | timeout 120s codex exec --skip-git-repo-check -s read-only --ephemeral --color never -o "$TMPFILE" "<prompt>"`
-  When DOCUMENT_PATH is a directory, expand the target with `find "$DOCUMENT_PATH" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | xargs -0 cat`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
+  `IFS=',' read -ra CTX <<< "$CONTEXT_PATHS"; { echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; for p in "${CTX[@]}"; do cat "$p"; done; } | timeout 120s codex exec --skip-git-repo-check -s read-only --ephemeral --color never -o "$TMPFILE" "<prompt>"`
+  When DOCUMENT_PATH is a directory, expand the target with a null-safe loop that labels each file so findings remain locatable: `find "$DOCUMENT_PATH" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | while IFS= read -r -d '' f; do echo "----- FILE: $f -----"; cat "$f"; done`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
 - Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
-- Read "$TMPFILE" and return its contents verbatim without summarizing or filtering, then delete "$TMPFILE".
+- Within the same shell invocation, after codex completes, output the contents of "$TMPFILE" (e.g. `cat "$TMPFILE"`) so the critique is captured, and return it verbatim without summarizing or filtering. The trap deletes the file when the shell exits.
 </critic>
 
 <critic id="claude_adversarial" mode="adversarial">
@@ -322,6 +330,7 @@ Instructions:
 - Assemble the ordered change set for the single implementation subagent: the list of eligible fixes, each with finding_id, the exact change to make, where it applies, and the recommended edit.
 - There is no partitioning across agents and no parallel application: one implementation subagent applies the whole change set sequentially in step_6.
 - Order the fixes so they apply without coordinate drift (for example, bottom of the document first), or instruct the apply-agent to re-locate each fix by content match immediately before editing.
+- If the change set is empty, skip step_6 entirely (do not launch an apply-agent or take a snapshot) and proceed to step_7. The round counts as applying zero fold_in fixes for loop_control's exit conditions.
 </step_5_assemble_change_set>
 
 <step_6_apply_fixes>
@@ -351,7 +360,7 @@ State updates:
 - Repeat round_execution for up to LOOPS iterations.
 - Convergence early-exit: after any round in which zero eligible fold_in fixes were applied AND no critical or high severity findings remain deferred, the document has converged. Stop the loop early and set the run outcome to converged_early.
 - Stall exit: after any round in which zero eligible fold_in fixes were applied BUT one or more critical or high severity findings remain deferred (due to architectural_reversal, conflicting_recommendations, or any other deferral cause), stop the loop and set the run outcome to stalled_no_actionable_fixes. This is a stall, not convergence: high-severity issues remain unresolved but cannot be auto-applied.
-- Failed-loop exit: if both external critics fail in a round (both_externals_failed), abort the run and set the run outcome to failed_loop.
+- Failed-loop exit: if both external critics fail in a round (both_externals_failed), abort the run and set the run outcome to failed_loop. Edits applied in prior completed rounds are retained; the abort does not roll back earlier rounds, only the current round produces no changes.
 - Do not ask the user questions between rounds.
 - Do not stop when an architectural reversal is found.
 - Surface deferred discussion items only in the final report.
