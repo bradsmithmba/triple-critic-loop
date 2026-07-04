@@ -42,6 +42,10 @@ Score threshold at or above which a finding is eligible for automatic applicatio
 Score threshold at or above which a finding is deferred for discussion. Findings below this threshold are skipped.
 </input>
 
+<input name="APPLY_MODEL" required="false" default="haiku">
+Model for the single implementation subagent that applies fixes. Default is Haiku (claude-haiku-4-5): the change set is mechanical (exact old-to-new text replacements), so a small fast model is sufficient and cheaper. Set to "sonnet" or another model to upgrade the apply agent when edits require more judgment.
+</input>
+
 <input name="PRIOR_FINDINGS" required="false">
 Cumulative list of findings addressed in prior rounds. Each entry must conform to the following minimal schema (matching the essentials of critic_output_schema):
 - finding_id: unique identifier for the finding (string)
@@ -78,7 +82,7 @@ Recoverable conditions:
 Operational invariants (govern normal execution, not failure handling):
 - no_user_intervention: no questions to the user between rounds.
 - complete_rounds_or_converge: run up to LOOPS rounds; exit early only on an exit condition defined in loop_control (convergence, stall, failed loop) or on a hard-failure halt. Do not exit early for any other reason. loop_control is the single source of truth for the exit conditions; do not restate them here.
-- claude_subagents_run_on_sonnet: per model_policy.
+- claude_subagent_models: per model_policy (critics on Sonnet; apply agent on APPLY_MODEL).
 
 Per-round validation (all must be true):
 - critic_count_per_round == 3
@@ -104,9 +108,10 @@ Policy:
 </architectural_reversal_policy>
 
 <model_policy>
-- Launch every Claude subagent in this skill on the Sonnet model: claude-sonnet-4-6. This covers the claude_adversarial critic, the single implementation subagent that applies changes, and any Sonnet fallback critic substituted for a failed external critic (see external_critic_fallback).
-- This is explicit and not inherited: pass model "sonnet" (claude-sonnet-4-6) when launching each Claude subagent, regardless of the orchestrator's model or any default subagent-model configuration.
-- The external critics (gemini, openai) are exempt: gemini runs via the Gemini CLI and openai via the Codex CLI, unaffected by Claude model selection.
+- Claude CRITIC subagents (the claude_adversarial critic and any fallback critic substituted for a failed external critic) run on Sonnet: claude-sonnet-4-6. Critique requires judgment; do not downgrade.
+- The single implementation subagent runs on APPLY_MODEL (default "haiku", claude-haiku-4-5). Its change set is mechanical, so the default is the fast, cheap model; the user may upgrade via APPLY_MODEL.
+- These choices are explicit and not inherited: pass the model when launching each Claude subagent, regardless of the orchestrator's model or any default subagent-model configuration.
+- The external critics (gemini, openai) are exempt: they run via their own CLIs, unaffected by Claude model selection.
 </model_policy>
 
 <critic_protocol>
@@ -127,6 +132,14 @@ Target and context:
 Prior findings:
 - When PRIOR_FINDINGS is non-empty, each critic receives it as an "ALREADY_ADDRESSED" section in its prompt and must not re-raise a finding whose root cause and affected component match a PRIOR_FINDINGS entry, unless new evidence shows the prior fix was insufficient.
 
+External payload assembly (shared by the gemini and openai critics):
+- Path validation: every DOCUMENT_PATH and CONTEXT_PATH must be an absolute path; reject it before constructing any Bash command if it contains shell metacharacters or newlines.
+- CONTEXT_PATHS is comma-separated; parse it with `IFS=',' read -ra CTX <<< "$CONTEXT_PATHS"` and cat each element quoted.
+- Directory expansion (target or context path): `find "$P" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | while IFS= read -r -d '' f; do echo "----- FILE: $f -----"; cat "$f"; done` so findings remain locatable per file.
+- Timeout: 120s default; for payloads over 200KB, add roughly 30s per additional 100KB.
+
+External critic prompt (shared): "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence (location plus a quote of at most 40 words), and recommendation."
+
 Output:
 - Group findings by severity (critical, high, medium, low, info).
 - Each finding conforms to critic_output_schema.
@@ -135,30 +148,22 @@ Output:
 <agents>
 <critic id="gemini" mode="external">
 - Runs via the external Gemini CLI; exempt from model_policy.
-- Path validation (shared by both external critics): every DOCUMENT_PATH and CONTEXT_PATH must be an absolute path and must be rejected before any Bash command is constructed if it contains shell metacharacters or newlines.
-- Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
-  CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so Gemini
-  critiques only the target. When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
+- Assemble the payload per critic_protocol's shared assembly rules (path validation, CONTEXT_PATHS parsing, directory expansion, timeout). When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
   `IFS=',' read -ra CTX <<< "$CONTEXT_PATHS"; { echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; for p in "${CTX[@]}"; do cat "$p"; done; } | timeout 120s ~/.local/bin/agy --print "<prompt>"`
-  When DOCUMENT_PATH is a directory, expand the target with a null-safe loop that labels each file so findings remain locatable: `find "$DOCUMENT_PATH" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | while IFS= read -r -d '' f; do echo "----- FILE: $f -----"; cat "$f"; done`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
-- Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
+  When CONTEXT_PATHS is empty, include only the TARGET section.
+- Prompt: the shared external critic prompt from critic_protocol.
 - Return Gemini's response verbatim without summarizing or filtering.
-- Artifact handling: some Gemini CLI variants return a prose summary inline and write the detailed structured findings to a local artifact file referenced in the response. If the response references such a file path, read that file and append its contents to the returned output BEFORE the usability check in external_critic_fallback is applied, so a valid review is not mistaken for a failure.
+- Artifact handling: some Gemini CLI variants return a prose summary inline and write the detailed findings to a local artifact file referenced in the response. If so, read that file and append its contents to the returned output BEFORE the external_critic_fallback usability check, so a valid review is not mistaken for a failure.
 </critic>
 
 <critic id="openai" mode="external">
 - Runs via the external Codex CLI using the user's ChatGPT OAuth session; exempt from model_policy. Uses the user's codex default model (no -m override).
-- Path validation: see the shared note in the gemini critic above.
-- The orchestrator generates a fresh TMPFILE per critic invocation: `TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.txt)`
-- Single-shell rule: the mktemp, the codex exec pipe, and the read of "$TMPFILE" must all run in ONE shell invocation. Do not split them across separate Bash calls: a `trap 'rm -f "$TMPFILE"' EXIT` fires when its shell exits, so in a split execution it would delete the codex output before the read, making every successful run look like an empty output and falsely triggering the fallback. Within that single invocation, set the trap immediately after mktemp so the file is cleaned up on any exit path (timeout, crash, or normal completion after the read).
-- Assemble the payload with Bash per critic_protocol: the TARGET content, then (if
-  CONTEXT_PATHS is set) the REFERENCE content, with a clear separator so the critic
-  critiques only the target, and pipe it into codex exec as stdin (codex appends
-  piped stdin as a <stdin> block). When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
-  `IFS=',' read -ra CTX <<< "$CONTEXT_PATHS"; { echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; for p in "${CTX[@]}"; do cat "$p"; done; } | timeout 120s codex exec --skip-git-repo-check -s read-only --ephemeral --color never -o "$TMPFILE" "<prompt>"`
-  When DOCUMENT_PATH is a directory, expand the target with a null-safe loop that labels each file so findings remain locatable: `find "$DOCUMENT_PATH" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | while IFS= read -r -d '' f; do echo "----- FILE: $f -----"; cat "$f"; done`. Expand directory CONTEXT_PATHs the same way. When CONTEXT_PATHS is empty, include only the TARGET section.
-- Prompt: "Review the TARGET document(s) for findings, treating the REFERENCE CONTEXT (if present) as the authoritative design the target must be consistent with, raising findings against the target only, including where the target contradicts or omits something the reference requires. Critique only the provided text; do not call tools or read other files. Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability. Group findings by severity (critical, high, medium, low, info). For each finding include: title, severity, confidence (high/medium/low), impact dimensions, whether it requires an architectural reversal (true/false), evidence, and recommendation."
-- Within the same shell invocation, after codex completes, output the contents of "$TMPFILE" (e.g. `cat "$TMPFILE"`) so the critique is captured, and return it verbatim without summarizing or filtering. The trap deletes the file when the shell exits.
+- Single-shell rule: mktemp, trap, the codex exec pipe, and the read of "$TMPFILE" must all run in ONE shell invocation (a split execution's EXIT trap deletes the output before the read, falsely triggering the fallback). Set `trap 'rm -f "$TMPFILE"' EXIT` immediately after mktemp; it guarantees cleanup on any exit path.
+- Assemble the payload per critic_protocol's shared assembly rules and pipe it into codex exec as stdin (codex appends piped stdin as a <stdin> block). When DOCUMENT_PATH is a file and CONTEXT_PATHS is set:
+  `TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.txt); trap 'rm -f "$TMPFILE"' EXIT; IFS=',' read -ra CTX <<< "$CONTEXT_PATHS"; { echo "===== TARGET (critique this) ====="; cat "$DOCUMENT_PATH"; echo "===== REFERENCE CONTEXT (read-only, do not critique) ====="; for p in "${CTX[@]}"; do cat "$p"; done; } | timeout 120s codex exec --skip-git-repo-check -s read-only --ephemeral --color never -o "$TMPFILE" "<prompt>"; cat "$TMPFILE"`
+  When CONTEXT_PATHS is empty, include only the TARGET section.
+- Prompt: the shared external critic prompt from critic_protocol, plus this suffix: "Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability."
+- Return the captured critique verbatim without summarizing or filtering.
 </critic>
 
 <critic id="claude_adversarial" mode="adversarial">
@@ -191,7 +196,7 @@ Required fields:
 - confidence: high | medium | low
 - impact_dimensions: list
 - architectural_reversal: true | false
-- evidence
+- evidence: the location (section name or file) plus a quote of at most 40 words. Do not reproduce long passages; the orchestrator has the full document and needs a pointer, not a copy.
 - recommendation
 </critic_output_schema>
 
@@ -233,8 +238,7 @@ Formula:
 - normalized_score = round(finding_score * 10, 1)
 
 Scale:
-- Scores are open-topped, not capped at 100. Critic agreement is the single priority lever, applied once via agreement_factor (1, 2, or 3 for one, two, or three agreeing critics). A high-severity finding all three critics agree on can therefore exceed 100, ranking above lesser findings instead of flattening to a shared ceiling. There is no separate critic-weight term: all critics are weighted equally, so agreement_factor alone carries critic count.
-- Thresholds (HIGH_THRESHOLD, LOW_THRESHOLD) are absolute cutoffs on this open scale.
+- Scores are open-topped (no cap at 100). Agreement is applied exactly once, via agreement_factor; all critics weigh equally. Thresholds are absolute cutoffs on this open scale.
 
 Priority thresholds:
 - auto_fold_in: HIGH_THRESHOLD (default: 50)
@@ -279,7 +283,7 @@ Priority order:
 
 3. If normalized_score >= HIGH_THRESHOLD AND severity IN [critical, high, medium]:
    - action: fold_in
-   - note: fix_filter is the single enforcement gate. The severity condition here mirrors fix_filter's severity gate; both must stay in sync. Any finding assigned fold_in that fix_filter subsequently rejects must be logged with an explicit rejection reason in round state and surfaced in the final report.
+   - note: the severity condition mirrors fix_filter's gate; keep them in sync. Rejections are logged per fix_filter.
 
 4. If normalized_score >= LOW_THRESHOLD:
    - action: defer
@@ -294,26 +298,18 @@ Eligible fixes must satisfy all conditions:
 - severity IN [critical, high, medium]
 - architectural_reversal == false
 
-Defense-in-depth note: the severity and architectural_reversal conditions above repeat guards already present in action_rules (rules 1 and 2). They are intentional defense-in-depth checks, not redundant dead code. If any finding assigned action=fold_in is rejected here, the orchestrator must log the rejection in round state with: finding_id, fix_filter_rejection_reason. That rejection must also be surfaced in the final report's scoring_summary under skipped/deferred rationale. Silent drops are not permitted.
+The severity and architectural_reversal conditions intentionally repeat action_rules guards (defense-in-depth). Any fold_in finding rejected here must be logged in round state (finding_id, fix_filter_rejection_reason) and surfaced in the final report's scoring_summary; silent drops are not permitted.
 </fix_filter>
 
 <round_execution>
 <step_1_launch_critics>
 - Launch all critics in parallel.
-- If an external critic fails to launch or returns no usable output, apply external_critic_fallback.
+- If an external critic fails to launch or returns no usable output, apply external_critic_fallback IMMEDIATELY on detecting the failure, concurrently with any still-running critics; do not wait for all critics to finish before launching the fallback.
 - Apply invariants.
 </step_1_launch_critics>
 
 <step_2_synthesize_findings>
-Grouping:
-- all_three_agree
-- two_agents_agree
-- one_agent
-
-Instructions:
-- Apply deduplication rules.
-- Preserve source attribution.
-- Preserve disagreement and contradiction between critics.
+- Synthesize per synthesis_model and deduplication; assign each merged finding its agreement class.
 </step_2_synthesize_findings>
 
 <step_3_score_findings>
@@ -327,18 +323,18 @@ Instructions:
 </step_4_filter_fixes>
 
 <step_5_assemble_change_set>
-- Assemble the ordered change set for the single implementation subagent: the list of eligible fixes, each with finding_id, the exact change to make, where it applies, and the recommended edit.
+- Assemble the ordered change set for the single implementation subagent. Each entry is MECHANICAL: { finding_id, file (if directory target), old_text (exact verbatim string to replace, unique in the file), new_text (exact verbatim replacement) }. The orchestrator writes the old/new strings itself from the synthesized recommendations; the apply agent performs replacements, it does not compose edits.
 - There is no partitioning across agents and no parallel application: one implementation subagent applies the whole change set sequentially in step_6.
-- Order the fixes so they apply without coordinate drift (for example, bottom of the document first), or instruct the apply-agent to re-locate each fix by content match immediately before editing.
+- Order the fixes bottom of the document first so earlier replacements cannot shift later match positions.
 - If the change set is empty, skip step_6 entirely (do not launch an apply-agent or take a snapshot) and proceed to step_7. The round counts as applying zero fold_in fixes for loop_control's exit conditions.
 </step_5_assemble_change_set>
 
 <step_6_apply_fixes>
 Snapshot: before launching the implementation subagent, the orchestrator snapshots the full target document content to a temp path (e.g., a mktemp file), so the round can be reverted. On any halt condition below, restore the snapshot by overwriting the target with the snapshot content, then delete the temp file.
 
-- Launch a SINGLE implementation subagent as a Claude subagent (model per model_policy), with clear context: the assembled change set from step_5 and the target path. Do not launch more than one apply-agent, and do not edit the document in the orchestrator yourself.
-- The implementation subagent applies every fix in the change set sequentially, re-reading the affected region before each edit so each edit is made against the current document state, not a stale view.
-- The implementation subagent reports each fix applied and where.
+- Launch a SINGLE implementation subagent as a Claude subagent (model APPLY_MODEL per model_policy), with clear context: the assembled change set from step_5 and the target path. Do not launch more than one apply-agent, and do not edit the document in the orchestrator yourself.
+- The implementation subagent applies every fix sequentially as an exact string replacement: replace old_text with new_text verbatim. If an old_text does not match the current document exactly, SKIP that fix and report it as unmatched; do not improvise an alternative edit.
+- The implementation subagent reports each fix applied and each fix skipped as unmatched. The orchestrator logs unmatched fixes in round state and surfaces them in the final report as unapplied.
 
 Post-apply check (after the implementation subagent completes):
 - Verify the document still parses structurally (well-formed XML if the document is XML-tagged; consistent heading structure if the document is Markdown).
@@ -347,12 +343,17 @@ Post-apply check (after the implementation subagent completes):
 </step_6_apply_fixes>
 
 <step_7_update_state>
-State updates:
-- prior_findings
+Round state lives in a file, not in the orchestrator's context. At run start, create it once: `STATE=$(mktemp /tmp/triple_critic_state_XXXXXX.json)`.
+
+After each round, write to the state file:
+- prior_findings (per the PRIOR_FINDINGS schema, including root_cause and affected_component)
 - deferred_discussion
-- applied_fixes
+- applied_fixes (and any unmatched fixes from step_6)
 - severity_curve
 - scoring_log
+- fallback substitutions and fix_filter rejections
+
+Subsequent rounds read what they need from the state file (e.g., prior_findings for the ALREADY_ADDRESSED sections) instead of carrying full round detail forward in context. The final report is assembled from the state file; delete the file after the report is produced. Side effect: an interrupted run can be resumed from the state file.
 </step_7_update_state>
 </round_execution>
 

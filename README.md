@@ -48,11 +48,12 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 | `LOOPS` | no | `3` | Maximum number of review rounds; the loop may stop early on convergence. |
 | `HIGH_THRESHOLD` | no | `50` | Score at or above which an eligible finding is auto-applied. The scale is open-topped and can exceed 100 when critics agree. |
 | `LOW_THRESHOLD` | no | `33` | Score at or above which a finding is deferred rather than skipped. |
+| `APPLY_MODEL` | no | `haiku` | Model for the single implementation subagent. The change set is mechanical (exact text replacements), so Haiku is the fast, cheap default; set to `sonnet` or another model to upgrade. |
 | `PRIOR_FINDINGS` | no | n/a | Cumulative findings carried in from prior rounds. |
 
 ## Dependencies
 
-- Claude Code with subagent support (the adversarial critic, any fallback critics, and the single implementation subagent run on `claude-sonnet-4-6`).
+- Claude Code with subagent support. The adversarial critic and any fallback critics run on `claude-sonnet-4-6`; the single implementation subagent runs on Haiku by default (upgrade via the `APPLY_MODEL` input).
 - The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration).
 - The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model, no API key required. If Codex is not authenticated, that critic falls back to a Sonnet subagent each round.
 - GNU coreutils, for `timeout` on the external critic calls. Linux ships it; on macOS install with `brew install coreutils` (provides `timeout` and `gtimeout`). Without it, the external critic commands fail with "command not found".
