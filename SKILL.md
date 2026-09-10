@@ -68,7 +68,7 @@ where `expand` cats a file or applies the directory expansion above. Quote every
 ### gemini (external)
 The Gemini CLI ignores stdin in schema mode, so the payload goes inside the prompt, and `--print` must be the last flag because it consumes the next token as its prompt:
 ```bash
-timeout "${T}s" ~/.local/bin/agy --sandbox --output-format json --json-schema "$SCHEMA" --print "<prompt>
+timeout "${T}s" env NO_BROWSER=1 TERM=xterm-256color ~/.local/bin/agy --sandbox --output-format json --json-schema "$SCHEMA" --print "<prompt>
 
 $(payload)" > "$STATE_DIR/round_$N/gemini.raw.json"
 jq '.structured_output' "$STATE_DIR/round_$N/gemini.raw.json" > "$STATE_DIR/round_$N/gemini.json"
