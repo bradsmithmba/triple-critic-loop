@@ -13,13 +13,15 @@ Given a design document (or a directory of documents), the skill runs N review r
    - **OpenAI** (external, via the Codex CLI on your ChatGPT OAuth session; balanced system-level critique: architecture, reliability, security, performance, scalability, operability)
    - **Claude adversarial** (Claude subagent; assumes the design fails: race conditions, concurrency, security bypass, scale failure, hidden assumptions)
 
-   If one external critic fails to launch in a round, a Sonnet subagent is substituted for its task so every round still has three critics. If both external critics fail in the same round, the run stops as a failed loop.
-2. Deduplicates and synthesizes findings, preserving disagreement between critics.
-3. Scores every finding (severity x confidence x agreement factor x impact weight); the agreement factor grows with the number of critics that raised the finding.
-4. Auto-applies eligible fixes: the orchestrator decides the change set, then a single implementation subagent applies it sequentially (the critics never edit).
-5. Defers architectural reversals instead of applying them.
+   Every critic returns JSON validated against `findings.schema.json`, including a root cause and affected component per finding. An external critic that returns no findings is treated as failed, not as a clean review. If one external critic fails in a round, an Opus subagent takes over its role so every round still has three critics from at least two model families. If both external critics fail in the same round, the run stops as a failed loop.
+2. Merges findings that share a root cause and affected component, preserving every source critic and any disagreement between them.
+3. Scores every finding (severity x confidence x agreement x impact weight). Agreement is the number of critics that raised the finding.
+4. Applies eligible fixes: a finding is fixed only when at least two critics raised it and its score clears the threshold. A single critic can never trigger an edit, and a low-severity finding is fixed only when all three critics raised it. The orchestrator hands the eligible findings to one apply agent, which composes and applies the edits; critics never edit.
+5. Defers architectural reversals and conflicting recommendations for human review instead of applying them.
 
-The loop stops early if a round applies no fixes and no critical or high findings remain (convergence). It returns a final report: the run outcome (completed, converged early, stalled, or failed), findings by severity and score, applied changes per round, a severity curve across rounds, a scoring summary, and deferred architectural reversals.
+From round two onward, critics also receive the previous round's diff and verify those fixes before looking for new issues. The loop stops early when a round applies no fixes and no critical or high finding with two-critic agreement remains (convergence), or when such findings remain but cannot be auto-applied (stall).
+
+Every run writes a state directory (`/tmp/triple_critic_*`) holding raw critic output, the scored synthesis, a pre-apply snapshot, and a unified diff per round. It is kept after the run as the audit trail and can be passed back as `STATE_DIR` to resume an interrupted run. The final report gives the run outcome (completed, converged early, stalled, halted, or failed), findings by severity and score, applied changes per round, a severity curve across rounds, a scoring summary, and deferred architectural reversals.
 
 ## Install
 
@@ -46,25 +48,27 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 | `DOCUMENT_PATH` | yes | n/a | Absolute path to the document or directory under review. |
 | `CONTEXT_PATHS` | no | n/a | Comma-separated reference docs the target must stay consistent with (read-only context). |
 | `LOOPS` | no | `3` | Maximum number of review rounds; the loop may stop early on convergence. |
-| `HIGH_THRESHOLD` | no | `50` | Score at or above which an eligible finding is auto-applied. The scale is open-topped and can exceed 100 when critics agree. |
+| `HIGH_THRESHOLD` | no | `50` | Score at or above which a finding with two-critic agreement is auto-applied. The scale is open-topped and can exceed 100 when all three critics agree. |
 | `LOW_THRESHOLD` | no | `33` | Score at or above which a finding is deferred rather than skipped. |
-| `APPLY_MODEL` | no | `haiku` | Model for the single implementation subagent. The change set is mechanical (exact text replacements), so Haiku is the fast, cheap default; set to `sonnet` or another model to upgrade. |
-| `PRIOR_FINDINGS` | no | n/a | Cumulative findings carried in from prior rounds. |
+| `APPLY_MODEL` | no | `sonnet` | Model for the single apply agent. It composes edits from the critics' recommendations, so it needs judgment; use `haiku` only for trivial documents. |
+| `STATE_DIR` | no | n/a | State directory from an interrupted run, to resume it. |
 
 ## Dependencies
 
-- Claude Code with subagent support. The adversarial critic and any fallback critics run on `claude-sonnet-4-6`; the single implementation subagent runs on Haiku by default (upgrade via the `APPLY_MODEL` input).
-- The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration).
-- The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model, no API key required. If Codex is not authenticated, that critic falls back to a Sonnet subagent each round.
+- Claude Code with subagent support. The adversarial critic runs on `claude-sonnet-4-6`, fallback critics on `claude-opus-5`, and the apply agent on Sonnet by default (change via the `APPLY_MODEL` input).
+- The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration). Must support `--output-format json` and `--json-schema`. The document travels inside the prompt because this CLI ignores stdin in schema mode.
+- `jq`, to extract the Gemini result from its JSON envelope.
+- The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model, no API key required. Must support `--output-schema`. If Codex is not authenticated, that critic falls back to an Opus subagent each round.
 - GNU coreutils, for `timeout` on the external critic calls. Linux ships it; on macOS install with `brew install coreutils` (provides `timeout` and `gtimeout`). Without it, the external critic commands fail with "command not found".
 
 ## Layout
 
 ```
 triple-critic-loop/
-├── SKILL.md            # the skill definition (canonical)
+├── SKILL.md              # the skill definition (canonical)
+├── findings.schema.json  # JSON schema every critic's output must match
 ├── versions/
-│   └── 1.0/SKILL.md    # originally published skill, preserved
+│   └── 1.0/SKILL.md      # originally published skill, preserved
 ├── README.md
 ├── LICENSE
 └── .gitignore
