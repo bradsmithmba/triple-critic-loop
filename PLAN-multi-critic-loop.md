@@ -6,7 +6,7 @@ Adds a fourth critic (Grok, via the `grok` CLI) to the review loop, moves the sc
 
 | Decision | Recommendation | Alternative | What changes |
 |---|---|---|---|
-| Grok `EFFORT` mapping | Pass `--reasoning-effort "$EFFORT"` straight through (low/medium/high), matching the flag's alias `--effort` | Confirm allowed values via `grok models` before shipping; if `--reasoning-effort` rejects `medium`, fall back to a model-variant scheme like Gemini's | Determines the grok command block below; **unconfirmed**, see Open Questions |
+| Grok `EFFORT` mapping | Pass `--reasoning-effort "$EFFORT"` straight through (low/medium/high), matching the flag's alias `--effort` | Fall back to a model-variant scheme like Gemini's | Determines the grok command block below; **confirmed**: a live run with `--reasoning-effort medium` exited 0 and produced a normal response, see EFFORT mapping section below |
 | Grok per-critic timeout `T` | 300s flat, or an inactivity guard if the harness supports one | Keep the shared 180s timeout | The fixture run took ~4 minutes; 180s kills every grok call |
 | Fold-in gate at N=4 (critical/high) | Keep raw count >= 2 | Strict majority (> N/2 = 3 of 4) | 2-of-4 changes 10 cells vs today (all low-severity, agreement=3); majority changes 40 cells and demotes two-model-agreed critical findings |
 | Fold-in gate at N=4 (medium) | Keep raw count >= 2, same as critical/high | Require 3 of 4 for medium only | Middle option changes 20 cells; recommendation changes none beyond the low-severity change already made |
@@ -21,11 +21,21 @@ Adds a fourth critic (Grok, via the `grok` CLI) to the review loop, moves the sc
 
 ### Identity and install
 
-Installed at `~/.grok/bin/grok` (a symlink to `~/.grok/downloads/grok-macos-aarch64`), with `~/.local/bin/grok` symlinked to `~/.grok/bin/grok`. `grok -v` reports `grok 1.0.5 (5115b46bc909) [stable]`. The CLI's `help.txt` lists `update` (`Check for updates or install a specific version`) as a subcommand, so updates run through `grok update` rather than a reinstall; no separate install command is grounded in the evidence, so none is stated here beyond "the binary already exists at this path."
+Fresh-machine install is `curl -fsSL https://x.ai/cli/install.sh | bash`, confirmed at `~/.grok/README.md` under "Quick Start": "# Install" followed by that exact line. On this machine, `~/.local/bin/grok` resolves (`readlink -f`) to `/Users/bradsmith/.grok/downloads/grok-macos-aarch64`. `~/.grok/version.json` records the installed build: `{"version": "1.0.5", "stable_version": "1.0.5", "checked_at": "2026-08-28T16:56:48.600932Z"}`. Updates run through `grok update`, confirmed via `grok update --help`, which lists `--check` ("Check for updates without installing"), `--json` ("Emit machine-readable JSON output (for --check)"), `--force-reinstall` ("Force re-download and install even if already up to date"), `--version <VERSION>` ("Install a specific version"), `--alpha` / `--stable` (release channel switches), `--debug`, `--debug-file <FILE>`, and `--leader-socket <PATH>`.
 
 ### Auth
 
-`help.txt` lists `login` (`Sign in to Grok`) and `logout` (`Sign out and clear cached credentials`) subcommands. A credential is already present on this machine (`~/.grok/auth.json`); runs are billed per call, confirmed by `total_cost_usd` in the response envelope. On a fresh machine, run `grok login` before the critic can execute; no credential value is stated here.
+`help.txt` lists `login` (`Sign in to Grok`) and `logout` (`Sign out and clear cached credentials`) subcommands, so auth is a browser OAuth flow via `grok login`. A credential is already present on this machine (`~/.grok/auth.json`), confirmed by `~/.grok/README.md`: "Credentials are stored in `~/.grok/auth.json` and persist across sessions. Tokens expire after 7 days; Grok will prompt you to re-authenticate when needed." An alternative is the `XAI_API_KEY` environment variable, confirmed in the same README (`export XAI_API_KEY="xai-..."`); neither file contains a real credential value, and none is stated here. Runs are billed per call, confirmed by `total_cost_usd` in the response envelope. For a non-interactive auth check, `grok models` prints a "logged in with" line before listing models; run on this machine it produced:
+
+```
+You are logged in with grok.com.
+
+Default model: grok-4.6
+
+Available models:
+  * grok-4.6 (default)
+  - grok-4.5
+```
 
 ### Headless invocation
 
@@ -41,7 +51,7 @@ Flags quoted from `help.txt`:
 
 ### Payload delivery
 
-Stdin is not honored as the payload. A test that asked Grok to "follow the instruction on stdin" produced a model turn that tried to locate the instruction with tools instead of reading it (three separate stdin-following attempts were run this session, session titles "Follow Instructions Provided via Standard Input" / "Follow stdin instruction generic command" / "Follow Instructions from Standard Input"; the referenced `live_test2.json` capture of that run's envelope was not present in the scratchpad at review time, see Open Questions). The payload must go inline in the `-p` prompt, the same workaround already used for the Gemini critic (`agy`).
+Stdin is not honored as the payload. A test that asked Grok to "follow the instruction on stdin" produced a model turn that tried to locate the instruction with tools instead of reading it (three separate stdin-following attempts were run this session, session titles "Follow Instructions Provided via Standard Input" / "Follow stdin instruction generic command" / "Follow Instructions from Standard Input"). The referenced `live_test2.json` capture of that run's envelope is still **unconfirmed**: it was not found at the given scratchpad path or anywhere under this session's scratchpad tree during this review. The payload must go inline in the `-p` prompt, the same workaround already used for the Gemini critic (`agy`).
 
 ### Structured output shape
 
@@ -52,8 +62,11 @@ Findings land at `.structuredOutput`, a JSON value, camelCase: note the case dif
 | Critic | Wall time | Findings | Input tokens | Output tokens | Cost (USD) |
 |---|---|---|---|---|---|
 | grok (grok-4.6-build) | ~4 min (13:12-13:16) | 10 (3 critical, 5 high, 2 medium) | 17,749 | 13,389 | 0.0197132 |
-| agy (Gemini) | 29-92s | (not re-measured here; see existing SKILL.md) | n/a | n/a | n/a |
-| codex (OpenAI) | 54-86s | (not re-measured here; see existing SKILL.md) | n/a | n/a | n/a |
+| agy (Gemini, gemini-3.1-pro-low) | 29-36s | 8 | not reported by CLI | not reported by CLI | not reported by CLI |
+| agy (Gemini, gemini-3.1-pro-high) | 44s | 8 | not reported by CLI | not reported by CLI | not reported by CLI |
+| agy (Gemini, earlier unpinned runs) | 65-92s | 9 | 14,365 (one unpinned run) | not reported by CLI | not reported by CLI |
+| codex (OpenAI, medium effort) | 54-62s | 8-9 | not reported by CLI | not reported by CLI | not reported by CLI |
+| codex (OpenAI, high effort) | 64-86s | 9-11 | not reported by CLI | not reported by CLI | not reported by CLI |
 
 Grok is the slowest critic by a wide margin on the same fixture. `stopReason` was `end_turn`, `num_turns` was 1, exit 0. The skill's current 180-second shared timeout would have killed this run before it produced output.
 
@@ -71,11 +84,11 @@ $(payload)" --output-format json --json-schema "$SCHEMA_CONTENT" --reasoning-eff
 jq '.structuredOutput' "$STATE_DIR/round_$N/grok.raw.json" > "$STATE_DIR/round_$N/grok.json"
 ```
 
-The measured fixture run did not pass `--reasoning-effort`; adding it is proposed, not measured, and its accepted values are not confirmed (see Open Questions).
+The measured fixture run did not pass `--reasoning-effort`; adding it is proposed and separately confirmed accepted for `medium` (see EFFORT mapping below), though not yet run together with the fixture document in one call. `--always-approve` is already in the block as a safety net alongside `--disallowed-tools`: the disallowed-tools list removes specific built-in tools, and `--always-approve` prevents any remaining tool call from blocking on an interactive approval prompt in a headless run.
 
 ### EFFORT mapping
 
-Propose `--reasoning-effort "$EFFORT"` unchanged (`low`, `medium`, `high` pass straight through), unlike Gemini's model-variant workaround. This is **not confirmed**: `help.txt` documents the flag's existence and purpose but not its accepted value set, and the fixture run that produced the measured numbers above did not pass this flag at all. Confirm with `grok --help reasoning-effort` (if such a subcommand help exists) or a live run with each candidate value before shipping; if an invalid value produces the same structured error envelope as the bad-model case, that becomes the fallback signature.
+Propose `--reasoning-effort "$EFFORT"` unchanged (`low`, `medium`, `high` pass straight through), unlike Gemini's model-variant workaround. This is now **confirmed**: running `grok -p "Reply with the single word ready." --reasoning-effort medium --output-format json --sandbox read-only --disallowed-tools "run_terminal_cmd,web_search,web_fetch,search_replace,task" --always-approve` under `timeout 120s` exited 0 and returned a normal JSON envelope (`"stopReason": "end_turn"`, `"reasoning_tokens": 73` in `usage`), with no error about the value. `medium` is accepted. `low` and `high` were not independently tested this session; treat them as accepted by the same mechanism unless a future run shows otherwise.
 
 ### Error signature
 
@@ -91,7 +104,9 @@ and stdout:
 {"type":"error","message":"Couldn't set model 'definitely-not-a-real-model-xyz': Invalid params: \"unknown model id\". Run 'grok models' to see available models."}
 ```
 
-The exit code was not captured in the artifacts from this session; treat it as **unknown** rather than asserting nonzero.
+Confirmed by re-running `grok -p "hi" --model definitely-not-a-real-model-xyz --output-format json` under `timeout 60s`: exit code **1**, with the same `{"type":"error","message":...}` envelope on stdout and the matching `Error:` line on stderr.
+
+Schema must be passed inline, not as a path: `--json-schema "$(cat "$SCHEMA")"`. Confirmed by re-running `grok -p "hi" --json-schema "$SCHEMA" --output-format json` (passing the file path directly, not its contents) under `timeout 30s`: exit 1, stderr `Error: --json-schema: invalid JSON: expected value at line 1 column 1`.
 
 ### Classification line (structured error output only)
 
