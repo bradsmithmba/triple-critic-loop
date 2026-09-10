@@ -17,9 +17,10 @@ disable-model-invocation: false
 - `HIGH_THRESHOLD` (optional, default 50): score at or above which an eligible finding is fixed.
 - `LOW_THRESHOLD` (optional, default 33): score at or above which a finding is deferred for discussion. Below it, skipped.
 - `APPLY_MODEL` (optional, default `sonnet`): model for the apply agent. It composes edits from recommendations, so it needs judgment; downgrade to `haiku` only for trivial documents.
+- `EFFORT` (optional, default `medium`, passed as `--effort`): reasoning effort for all three critics, one of `low`, `medium`, `high`.
 - `STATE_DIR` (optional): path of a state directory from an interrupted run, to resume it. When omitted, a new one is created.
 
-Validate before launching anything: LOOPS >= 1, HIGH_THRESHOLD > LOW_THRESHOLD >= 0, every path absolute and existing. On failure, abort with a clear error.
+Validate before launching anything: LOOPS >= 1, HIGH_THRESHOLD > LOW_THRESHOLD >= 0, EFFORT one of low/medium/high, every path absolute and existing. On failure, abort with a clear error.
 </inputs>
 
 <state>
@@ -67,9 +68,10 @@ where `expand` cats a file or applies the directory expansion above. Quote every
 
 <agents>
 ### gemini (external)
-The Gemini CLI ignores stdin in schema mode, so the payload goes inside the prompt, and `--print` must be the last flag because it consumes the next token as its prompt:
+The Gemini CLI ignores stdin in schema mode, so the payload goes inside the prompt, and `--print` must be the last flag because it consumes the next token as its prompt. The Pro model exposes only `low` and `high` variants, not a tunable `--effort` flag alongside a fixed model, so EFFORT maps onto model selection instead; medium collapses onto low so the high override is a real step up from the default:
 ```bash
-timeout "${T}s" env NO_BROWSER=1 TERM=xterm-256color ~/.local/bin/agy --sandbox --output-format json --json-schema "$SCHEMA" --print "<prompt>
+GEMINI_MODEL=$([ "$EFFORT" = high ] && echo gemini-3.1-pro-high || echo gemini-3.1-pro-low)
+timeout "${T}s" env NO_BROWSER=1 TERM=xterm-256color ~/.local/bin/agy --sandbox --output-format json --json-schema "$SCHEMA" --model "$GEMINI_MODEL" --print "<prompt>
 
 $(payload)" > "$STATE_DIR/round_$N/gemini.raw.json" 2> "$STATE_DIR/round_$N/gemini.stderr"
 jq '.structured_output' "$STATE_DIR/round_$N/gemini.raw.json" > "$STATE_DIR/round_$N/gemini.json"
@@ -80,13 +82,13 @@ The findings live at `.structured_output`, already a JSON value. Ignore `.respon
 Runs on the user's ChatGPT OAuth session and default codex model. Everything must run in ONE shell invocation:
 ```bash
 TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.json); trap 'rm -f "$TMPFILE"' EXIT
-payload | timeout "${T}s" codex exec --skip-git-repo-check -s read-only --ephemeral --color never -c model_reasoning_effort="high" --json --output-schema "$SCHEMA" -o "$TMPFILE" "<prompt> Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability." > "$STATE_DIR/round_$N/openai.events.jsonl" 2> "$STATE_DIR/round_$N/openai.stderr"
+payload | timeout "${T}s" codex exec --skip-git-repo-check -s read-only --ephemeral --color never -c model_reasoning_effort="$EFFORT" --json --output-schema "$SCHEMA" -o "$TMPFILE" "<prompt> Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability." > "$STATE_DIR/round_$N/openai.events.jsonl" 2> "$STATE_DIR/round_$N/openai.stderr"
 cp "$TMPFILE" "$STATE_DIR/round_$N/openai.json"
 ```
 A nonzero exit with `$TMPFILE` absent or empty means the process died mid-stream, not that the model produced nothing: retry once with a fresh invocation before classifying the failure under external_critic_fallback. With reasoning summaries off by default, stderr goes flat for most of the run and only fills near the end, so the wall-clock timeout is the only guard here too.
 
 ### claude_adversarial (Claude subagent, model `claude-sonnet-4-6`, passed explicitly)
-Follows critic_protocol; reads the target and context with its own tools and writes `round_N/claude.json`. Prompt suffix: "Assume the design will fail. Challenge every mitigation until proven sufficient. Do not soften findings." Pick the focus list for the document type and include it: for systems and code, race conditions, concurrency, security bypass, scale failure, hidden assumptions, week-one production failures; for product and process documents, unstated assumptions, missing failure paths, unowned decisions, unmeasurable success criteria, and contradictions with the reference context.
+Follows critic_protocol; reads the target and context with its own tools and writes `round_N/claude.json`. Prompt suffix: "Assume the design will fail. Challenge every mitigation until proven sufficient. Do not soften findings." Pick the focus list for the document type and include it: for systems and code, race conditions, concurrency, security bypass, scale failure, hidden assumptions, week-one production failures; for product and process documents, unstated assumptions, missing failure paths, unowned decisions, unmeasurable success criteria, and contradictions with the reference context. Launch with `subagent_type: critic-$EFFORT`; the agent definitions under `agents/` set the model to `claude-sonnet-4-6` and the effort, so if the agent type is missing, the definitions are not installed and the run should abort with that message rather than falling back to general-purpose.
 
 ### external_critic_fallback
 An external critic fails when its command exits non-zero, times out, or its output is not usable per critic_protocol. Before substituting, classify the failure: if the critic's structured error output matches an auth or quota signature, do not substitute, since the condition will recur every round and substituting a model does not fix the account; abort the run as failed_loop, naming the critic and the matched signature. Classification reads only structured error output, never echoed prompt or model text: codex echoes both the prompt and the answer to stderr, so a text match over stderr or stdout is never safe for it, and free-form response text is never safe for agy either. Signature check, per critic:
