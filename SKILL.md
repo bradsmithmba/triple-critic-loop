@@ -82,6 +82,7 @@ TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.json); trap 'rm -f "$TMPFILE"'
 payload | timeout "${T}s" codex exec --skip-git-repo-check -s read-only --ephemeral --color never -c model_reasoning_effort="high" --output-schema "$SCHEMA" -o "$TMPFILE" "<prompt> Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability."
 cp "$TMPFILE" "$STATE_DIR/round_$N/openai.json"
 ```
+A nonzero exit with `$TMPFILE` absent or empty means the process died mid-stream, not that the model produced nothing: retry once with a fresh invocation before classifying the failure under external_critic_fallback.
 
 ### claude_adversarial (Claude subagent, model `claude-sonnet-4-6`, passed explicitly)
 Follows critic_protocol; reads the target and context with its own tools and writes `round_N/claude.json`. Prompt suffix: "Assume the design will fail. Challenge every mitigation until proven sufficient. Do not soften findings." Pick the focus list for the document type and include it: for systems and code, race conditions, concurrency, security bypass, scale failure, hidden assumptions, week-one production failures; for product and process documents, unstated assumptions, missing failure paths, unowned decisions, unmeasurable success criteria, and contradictions with the reference context.
