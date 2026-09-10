@@ -51,14 +51,15 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 | `HIGH_THRESHOLD` | no | `50` | Score at or above which a finding with two-critic agreement is auto-applied. The scale is open-topped and can exceed 100 when all three critics agree. |
 | `LOW_THRESHOLD` | no | `33` | Score at or above which a finding is deferred rather than skipped. |
 | `APPLY_MODEL` | no | `sonnet` | Model for the single apply agent. It composes edits from the critics' recommendations, so it needs judgment; use `haiku` only for trivial documents. |
+| `EFFORT` | no | `medium` | Reasoning effort for all three critics: `low`, `medium`, or `high`. Gemini's Pro model exposes only low and high variants, so `medium` selects the low variant there. |
 | `STATE_DIR` | no | n/a | State directory from an interrupted run, to resume it. |
 
 ## Dependencies
 
 - Claude Code with subagent support. The adversarial critic runs on `claude-sonnet-4-6`, fallback critics on `claude-opus-5`, and the apply agent on Sonnet by default (change via the `APPLY_MODEL` input).
-- The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration). Must support `--output-format json` and `--json-schema`. The document travels inside the prompt because this CLI ignores stdin in schema mode. Invoked with `NO_BROWSER=1 TERM=xterm-256color` so it does not try to open a browser or assume an unsupported terminal in a headless environment.
+- The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration), pinned to the `gemini-3.1-pro` model. Must support `--output-format json`, `--json-schema`, and `--model`. The model exposes only `gemini-3.1-pro-low` and `gemini-3.1-pro-high` variants, not a tunable effort flag, so EFFORT selects between them. The document travels inside the prompt because this CLI ignores stdin in schema mode. Invoked with `NO_BROWSER=1 TERM=xterm-256color` so it does not try to open a browser or assume an unsupported terminal in a headless environment.
 - `jq`, to extract the Gemini result from its JSON envelope.
-- The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model at high reasoning effort, no API key required. Must support `--output-schema` and `-c model_reasoning_effort`. If Codex is not authenticated, the run stops as a failed loop instead of falling back, since re-authenticating is required before the critic can run at all.
+- The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model at the configured reasoning effort, no API key required. Must support `--output-schema` and `-c model_reasoning_effort`. If Codex is not authenticated, the run stops as a failed loop instead of falling back, since re-authenticating is required before the critic can run at all.
 - GNU coreutils, for `timeout` on the external critic calls. Linux ships it; on macOS install with `brew install coreutils` (provides `timeout` and `gtimeout`). Without it, the external critic commands fail with "command not found".
 
 ## Layout
