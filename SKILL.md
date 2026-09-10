@@ -1,12 +1,12 @@
 ---
 name: triple-critic-loop
-description: "Orchestrates a scored triple-critic design review. Launches three independent critics (Gemini, OpenAI, Claude adversarial), synthesizes and scores findings, applies fixes that at least two critics agree on, and repeats for the configured number of rounds. Returns a final report with severity curve, scoring summary, and deferred architectural reversals. Data handling: documents under review are sent to external CLIs (Gemini, OpenAI/Codex); do not run this skill on documents containing credentials, PII, or data governed by residency requirements."
+description: "Orchestrates a scored triple-critic design review. Launches three independent critics (Gemini, OpenAI, Claude adversarial), plus an optional fourth on the Grok CLI, synthesizes and scores findings, applies fixes that at least two critics agree on, and repeats for the configured number of rounds. Returns a final report with severity curve, scoring summary, and deferred architectural reversals. Data handling: documents under review are sent to external CLIs (Gemini, OpenAI/Codex, and xAI/Grok when enabled); do not run this skill on documents containing credentials, PII, or data governed by residency requirements."
 disable-model-invocation: false
 ---
 
 <role_definition>
 - You are the orchestrator of a scored triple-critic design review.
-- Each round: launch three independent critics in parallel, merge and score their findings, decide which findings to fix, and launch ONE apply agent that composes and applies those fixes. Critics never edit. You never edit the target yourself.
+- Each round: launch the independent critics in parallel (three, or four with GROK), merge and score their findings, decide which findings to fix, and launch ONE apply agent that composes and applies those fixes. Critics never edit. You never edit the target yourself.
 - Run up to LOOPS rounds. Exit early only on a loop_control exit condition. Never ask the user questions between rounds.
 </role_definition>
 
@@ -17,7 +17,8 @@ disable-model-invocation: false
 - `HIGH_THRESHOLD` (optional, default 50): score at or above which an eligible finding is fixed.
 - `LOW_THRESHOLD` (optional, default 33): score at or above which a finding is deferred for discussion. Below it, skipped.
 - `APPLY_MODEL` (optional, default `sonnet`): model for the apply agent. It composes edits from recommendations, so it needs judgment; downgrade to `haiku` only for trivial documents.
-- `EFFORT` (optional, default `medium`, passed as `--effort`): reasoning effort for all three critics, one of `low`, `medium`, `high`.
+- `EFFORT` (optional, default `medium`, passed as `--effort`): reasoning effort for every critic, one of `low`, `medium`, `high`.
+- `GROK` (optional, default false, passed as `--grok`): adds a fourth critic on the Grok CLI. Its run is slower than the others, so it carries its own 300s timeout.
 - `STATE_DIR` (optional): path of a state directory from an interrupted run, to resume it. When omitted, a new one is created.
 
 Validate before launching anything: LOOPS >= 1, HIGH_THRESHOLD > LOW_THRESHOLD >= 0, EFFORT one of low/medium/high, every path absolute and existing. On failure, abort with a clear error.
@@ -25,18 +26,19 @@ Validate before launching anything: LOOPS >= 1, HIGH_THRESHOLD > LOW_THRESHOLD >
 
 <state>
 At run start, unless resuming: `STATE_DIR=$(mktemp -d /tmp/triple_critic_XXXXXX)`. It holds, per round N:
-- `round_N/gemini.json`, `round_N/openai.json`, `round_N/claude.json`: raw critic output, one `findings` array each.
+- `round_N/gemini.json`, `round_N/openai.json`, `round_N/claude.json`, and `round_N/grok.json` when GROK is set: raw critic output, one `findings` array each.
 - `round_N/synthesis.json`: merged findings with source critics, agreement count, score, action, and status.
 - `round_N/snapshot/`: copy of the target taken before the apply step.
 - `round_N/applied.diff`: `diff -ru round_N/snapshot <target>` after the apply step.
 - `round_N/notes.json`: fallback substitutions, halts, unapplied findings.
-- `round_N/gemini.stderr`, `round_N/openai.stderr`, `round_N/openai.events.jsonl`: captured stderr and codex protocol events, used for failure classification.
+- `round_N/gemini.stderr`, `round_N/openai.stderr`, `round_N/openai.events.jsonl`, and `round_N/grok.stderr` when GROK is set: captured stderr and codex protocol events, used for failure classification.
+- `round_N/notes.json` also records `N_ran`, the number of critics that produced usable output this round.
 
 The state directory is never deleted. It is the audit trail, the input to the final report, and the resume point: when STATE_DIR is given, continue from the first round that has no `synthesis.json`. Later rounds read prior_findings and the previous diff from here rather than carrying them in context.
 </state>
 
 <critic_protocol>
-Shared contract for all three critics.
+Shared contract for every critic.
 
 ### Input
 - TARGET: the full target under DOCUMENT_PATH. Directories are expanded with `find "$P" -type f \( -name "*.md" -o -name "*.txt" \) -print0 | while IFS= read -r -d '' f; do echo "----- FILE: $f -----"; cat "$f"; done` so findings stay locatable per file.
@@ -63,7 +65,7 @@ payload() {
   [ -f "$PREVDIFF" ] && { echo "===== PREVIOUS_ROUND_DIFF ====="; cat "$PREVDIFF"; }
 }
 ```
-where `expand` cats a file or applies the directory expansion above. Quote every variable. Timeout: 180s, plus 30s per 100KB of payload beyond 200KB.
+where `expand` cats a file or applies the directory expansion above. Quote every variable. Timeout T: 180s for gemini and openai, 300s for grok (measured 219s on a 3KB document), each plus 30s per 100KB of payload beyond 200KB.
 </critic_protocol>
 
 <agents>
@@ -87,15 +89,26 @@ cp "$TMPFILE" "$STATE_DIR/round_$N/openai.json"
 ```
 A nonzero exit with `$TMPFILE` absent or empty means the process died mid-stream, not that the model produced nothing: retry once with a fresh invocation before classifying the failure under external_critic_fallback. With reasoning summaries off by default, stderr goes flat for most of the run and only fills near the end, so the wall-clock timeout is the only guard here too.
 
+### grok (external, only when GROK is set)
+Runs on the user's Grok login (`grok login`; the stored token expires after 7 days, `grok models` confirms the login without prompting). Stdin is ignored, so the payload goes inside the prompt, and the schema is passed as an inline string, not a path:
+```bash
+timeout "${T}s" ~/.local/bin/grok -p "<prompt>
+
+$(payload)" --output-format json --json-schema "$(cat "$SCHEMA")" --reasoning-effort "$EFFORT" --sandbox read-only --always-approve --disallowed-tools "run_terminal_cmd,web_search,web_fetch,search_replace,task" > "$STATE_DIR/round_$N/grok.raw.json" 2> "$STATE_DIR/round_$N/grok.stderr"
+jq '.structuredOutput' "$STATE_DIR/round_$N/grok.raw.json" > "$STATE_DIR/round_$N/grok.json"
+```
+The findings live at `.structuredOutput` (camelCase, unlike agy). `.text` repeats them as a string; ignore it. Output is written once at completion, so the wall-clock timeout is the only guard.
+
 ### claude_adversarial (Claude subagent, model `claude-sonnet-4-6`, passed explicitly)
 Follows critic_protocol; reads the target and context with its own tools and writes `round_N/claude.json`. Prompt suffix: "Assume the design will fail. Challenge every mitigation until proven sufficient. Do not soften findings." Pick the focus list for the document type and include it: for systems and code, race conditions, concurrency, security bypass, scale failure, hidden assumptions, week-one production failures; for product and process documents, unstated assumptions, missing failure paths, unowned decisions, unmeasurable success criteria, and contradictions with the reference context. Launch with `subagent_type: critic-$EFFORT`; the agent definitions under `agents/` set the model to `claude-sonnet-4-6` and the effort, so if the agent type is missing, the definitions are not installed and the run should abort with that message rather than falling back to general-purpose.
 
 ### external_critic_fallback
 An external critic fails when its command exits non-zero, times out, or its output is not usable per critic_protocol. Before substituting, classify the failure: if the critic's structured error output matches an auth or quota signature, do not substitute, since the condition will recur every round and substituting a model does not fix the account; abort the run as failed_loop, naming the critic and the matched signature. Classification reads only structured error output, never echoed prompt or model text: codex echoes both the prompt and the answer to stderr, so a text match over stderr or stdout is never safe for it, and free-form response text is never safe for agy either. Signature check, per critic:
 - codex: `jq -r 'select(.type=="error" or .type=="turn.failed") | .. | strings' "$STATE_DIR/round_$N/openai.events.jsonl" | grep -Eiq 'not authenticated|login required|invalid credentials|refresh token|invalid_grant|\b401\b|quota exceeded|rate limit|\b429\b|resource exhausted|usage limit'`
+- grok: `{ jq -r 'select(.type=="error") | .message' "$STATE_DIR/round_$N/grok.raw.json"; grep -E '^Error:' "$STATE_DIR/round_$N/grok.stderr"; } | grep -Eiq 'not authenticated|login required|invalid credentials|refresh token|invalid_grant|\b401\b|quota exceeded|rate limit|\b429\b|resource exhausted|usage limit'`
 - agy: `{ grep -E '^error:' "$STATE_DIR/round_$N/gemini.stderr"; jq -r 'del(.response, .structured_output) | tostring' "$STATE_DIR/round_$N/gemini.raw.json"; } | grep -Eiq 'not authenticated|login required|invalid credentials|refresh token|invalid_grant|\b401\b|quota exceeded|rate limit|\b429\b|resource exhausted|usage limit'` (agy prints fatal errors to stderr with a stable `error:` marker, and the envelope's status and error fields are structured, while `.response` and `.structured_output` carry model text)
 
-Any other failure (timeout, malformed output, empty findings, nonzero exit without that signature) takes the fallback path: immediately (without waiting for other critics) substitute a Claude subagent on `claude-opus-5`, passed explicitly, taking over that critic's prompt and role. Opus rather than Sonnet keeps the critic set model-diverse, since the adversarial critic is already Sonnet. If both external critics fail in the same round, do not substitute: abort with run_outcome failed_loop. Record every substitution or auth/quota abort in `notes.json`.
+Any other failure (timeout, malformed output, empty findings, nonzero exit without that signature) takes the fallback path: immediately (without waiting for other critics) substitute a Claude subagent on `claude-opus-5`, passed explicitly, taking over that critic's prompt and role. Opus rather than Sonnet keeps the critic set model-diverse, since the adversarial critic is already Sonnet. At most one external critic (gemini, openai, or grok) is substituted per round; if a second external critic fails in the same round, do not substitute: abort with run_outcome failed_loop, since two Claude substitutes beside the Claude adversarial critic would let one model family reach the agreement gate alone. Record every substitution or auth/quota abort in `notes.json`.
 
 ### apply agent (Claude subagent, model APPLY_MODEL, passed explicitly)
 Receives the target path and the list of fold_in findings: finding_id, affected_component, evidence, recommendation, and the merged recommendations of all source critics. For each finding it composes the minimal edit that implements the recommendation and applies it with exact-match edits, one finding at a time. It changes nothing outside the affected component, never touches reference documents, and reports each finding as applied or unapplied with a reason. It never spawns subagents.
@@ -104,19 +117,20 @@ Receives the target path and the list of fold_in findings: finding_id, affected_
 <scoring_model>
 - severity: critical 5, high 4, medium 3, low 2, info 1
 - confidence: high 1.0, medium 0.7, low 0.4
-- agreement: number of critics whose findings merged into this one (1, 2, or 3)
+- raised: number of critics whose findings merged into this one. N_ran: number of critics that produced usable output this round (3, or 4 with GROK).
+- agreement: `3 * raised / N_ran`. A unanimous finding scores the same whether three or four critics ran; thresholds do not move when GROK is toggled.
 - impact: the highest weight among the listed impact_dimensions. correctness 1.3, security 1.5, reliability 1.4, scalability 1.2, operability 1.1, maintainability 1.0, clarity 0.8. The max, not the mean, so a critic that lists an extra low-weight dimension is not penalized for thoroughness; score inflation from a single critic is already contained by the agreement gate.
 - `score = round(severity * confidence * agreement * impact * 10, 1)`. Open-topped; thresholds are absolute.
 </scoring_model>
 
 <synthesis>
-1. Load the three critic files. Two findings merge when their root_cause names the same defect AND their affected_component is the same section or file. Title or evidence similarity alone never merges.
+1. Load every critic file that was produced this round. Two findings merge when their root_cause names the same defect AND their affected_component is the same section or file. Title or evidence similarity alone never merges.
 2. A merged finding keeps every source critic, the maximum severity, the highest confidence unless the evidence conflicts, and the union of impact_dimensions. Recommendations combine when compatible; when they conflict, keep both verbatim and mark `conflicting_recommendations: true`. Do not judge which is safer.
 3. Score every merged finding per scoring_model. Preserve unique findings and disagreements; drop nothing.
 4. Assign an action, first rule that matches wins:
    - `architectural_reversal` true: defer. Never auto-applied, never stops the loop, surfaced in the final report only.
    - `conflicting_recommendations` true: defer.
-   - score >= HIGH_THRESHOLD AND agreement >= 2 AND (severity in [critical, high, medium] OR agreement == 3): fold_in. A single critic never triggers a fix, whatever its score; the agreement of independent models is the gate. Low-severity findings fold in only when all three critics raised them.
+   - score >= HIGH_THRESHOLD AND raised >= 2 AND (severity in [critical, high, medium] OR raised >= 3): fold_in. A single critic never triggers a fix, whatever its score; the agreement of independent models is the gate. Low-severity findings fold in only when at least three critics raised them (unanimous at three, three of four with GROK).
    - score >= LOW_THRESHOLD: defer.
    - otherwise: skip.
 5. Write `synthesis.json`. A round with an incomplete synthesis is invalid; halt it.
@@ -125,7 +139,7 @@ An architectural reversal is a finding that changes a core architecture decision
 </synthesis>
 
 <round_execution>
-1. Create `round_N/`. Launch all three critics in parallel; apply external_critic_fallback on any failure. Each critic sees the full target and nothing from any other critic.
+1. Create `round_N/`. Launch every critic in parallel (grok only when GROK is set); apply external_critic_fallback on any failure. Each critic sees the full target and nothing from any other critic.
 2. Run synthesis.
 3. If no finding has action fold_in, record zero applied fixes and go to step 6.
 4. Copy the target to `round_N/snapshot/`. Launch the single apply agent with the fold_in findings.
@@ -135,9 +149,9 @@ An architectural reversal is a finding that changes a core architecture decision
 
 <loop_control>
 Evaluated after each round, in order:
-- failed_loop: both external critics failed this round. Stop. Earlier rounds' edits stand.
-- converged_early: zero fixes applied this round and no deferred finding of severity critical or high with agreement >= 2. Stop.
-- stalled_no_actionable_fixes: zero fixes applied this round but at least one deferred critical or high finding with agreement >= 2 remains. Stop; the document has unresolved high-severity issues that cannot be auto-applied.
+- failed_loop: two external critics failed this round. Stop. Earlier rounds' edits stand.
+- converged_early: zero fixes applied this round and no deferred finding of severity critical or high raised by at least two critics. Stop.
+- stalled_no_actionable_fixes: zero fixes applied this round but at least one deferred critical or high finding raised by at least two critics remains. Stop; the document has unresolved high-severity issues that cannot be auto-applied.
 - Otherwise continue until LOOPS rounds are complete: completed_all_rounds.
 </loop_control>
 

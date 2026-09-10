@@ -1,5 +1,7 @@
 # Plan: Multi-Critic Loop (Add a Grok Critic, Rename from Triple)
 
+> Status 2026-09-10: the Grok critic shipped as an optional fourth critic behind `--grok` with a 300s timeout, and the scoring model now scales agreement by the number of critics that ran, so both three- and four-critic rounds are supported. The rename and the remaining phases below are still proposed, not executed.
+
 Adds a fourth critic (Grok, via the `grok` CLI) to the review loop, moves the scoring model from a raw agreement count to a fractional agreement factor so severity thresholds keep their meaning at N=4, and renames the skill from `triple-critic-loop` to `multi-critic-loop` since "triple" stops being accurate. All facts below were measured on 2026-09-10 against the installed `grok 1.0.5 (5115b46bc909) [stable]` CLI, the current `SKILL.md` at commit `28f2d71`, and a scoring-space enumeration script (`scores4.py`) run against the same formula SKILL.md already uses.
 
 ## Decisions
