@@ -8,16 +8,15 @@ This loop has an orchestrator that launches three sub agents with clean context,
 
 Given a design document (or a directory of documents), the skill runs N review rounds. Each round:
 
-1. Launches three independent critics in parallel, or four with `--grok`:
+1. Launches three independent critics in parallel:
    - **Gemini** (external, via the Gemini CLI)
    - **OpenAI** (external, via the Codex CLI on your ChatGPT OAuth session; balanced system-level critique: architecture, reliability, security, performance, scalability, operability)
    - **Claude adversarial** (Claude subagent; assumes the design fails: race conditions, concurrency, security bypass, scale failure, hidden assumptions)
-   - **Grok** (optional, external, via the Grok CLI; a fourth model family, slower than the others, so it gets a 300 second timeout)
 
-   Every critic returns JSON validated against `findings.schema.json`, including a root cause and affected component per finding. An external critic that returns no findings is treated as failed, not as a clean review. For the OpenAI critic, a nonzero exit with no output file means the process died mid-stream; that gets one retry with a fresh invocation before it is treated as a failure. A failed critic is classified before any substitution: an authentication or quota failure (not authenticated, invalid credentials, quota exceeded, rate limit, and similar signatures) is not substituted, since the condition will recur every round, and the run stops as a failed loop naming the critic and the signature. Any other failure (timeout, malformed output, empty findings) is substituted with an Opus subagent taking over that critic's role, so the round still has its full critic count from at least two model families. At most one external critic is substituted per round. If both external critics fail in the same round, the run stops as a failed loop.
+   Every critic returns JSON validated against `findings.schema.json`, including a root cause and affected component per finding. An external critic that returns no findings is treated as failed, not as a clean review. For the OpenAI critic, a nonzero exit with no output file means the process died mid-stream; that gets one retry with a fresh invocation before it is treated as a failure. A failed critic is classified before any substitution: an authentication or quota failure (not authenticated, invalid credentials, quota exceeded, rate limit, and similar signatures) is not substituted, since the condition will recur every round, and the run stops as a failed loop naming the critic and the signature. Any other failure (timeout, malformed output, empty findings) is substituted with an Opus subagent taking over that critic's role, so the round still has three critics from at least two model families. If both external critics fail in the same round, the run stops as a failed loop.
 2. Merges findings that share a root cause and affected component, preserving every source critic and any disagreement between them.
-3. Scores every finding (severity x confidence x agreement x impact weight). Agreement is scaled by the number of critics that ran, so a unanimous finding scores the same with three or four critics and the thresholds do not move when Grok is toggled.
-4. Applies eligible fixes: a finding is fixed only when at least two critics raised it and its score clears the threshold. A single critic can never trigger an edit, and a low-severity finding is fixed only when at least three critics raised it. The orchestrator hands the eligible findings to one apply agent, which composes and applies the edits; critics never edit.
+3. Scores every finding (severity x confidence x agreement x impact weight). Agreement is the number of critics that raised the finding.
+4. Applies eligible fixes: a finding is fixed only when at least two critics raised it and its score clears the threshold. A single critic can never trigger an edit, and a low-severity finding is fixed only when all three critics raised it. The orchestrator hands the eligible findings to one apply agent, which composes and applies the edits; critics never edit.
 5. Defers architectural reversals and conflicting recommendations for human review instead of applying them.
 
 From round two onward, critics also receive the previous round's diff and verify those fixes before looking for new issues. The loop stops early when a round applies no fixes and no critical or high finding with two-critic agreement remains (convergence), or when such findings remain but cannot be auto-applied (stall).
@@ -55,19 +54,17 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 | `DOCUMENT_PATH` | yes | n/a | Absolute path to the document or directory under review. |
 | `CONTEXT_PATHS` | no | n/a | Comma-separated reference docs the target must stay consistent with (read-only context). |
 | `LOOPS` | no | `3` | Maximum number of review rounds; the loop may stop early on convergence. |
-| `HIGH_THRESHOLD` | no | `50` | Score at or above which a finding with two-critic agreement is auto-applied. The scale is open-topped and can exceed 100 when every critic agrees. |
+| `HIGH_THRESHOLD` | no | `50` | Score at or above which a finding with two-critic agreement is auto-applied. The scale is open-topped and can exceed 100 when all three critics agree. |
 | `LOW_THRESHOLD` | no | `33` | Score at or above which a finding is deferred rather than skipped. |
 | `APPLY_MODEL` | no | `sonnet` | Model for the single apply agent. It composes edits from the critics' recommendations, so it needs judgment; use `haiku` only for trivial documents. |
-| `GROK` | no | `false` | Pass `--grok` to add a fourth critic on the Grok CLI. Requires `grok login`. |
-| `EFFORT` | no | `medium` | Reasoning effort for every critic: `low`, `medium`, or `high`. Gemini's Pro model exposes only low and high variants, so `medium` and `high` both select the high variant there and only `low` selects the low variant. |
+| `EFFORT` | no | `medium` | Reasoning effort for all three critics: `low`, `medium`, or `high`. Gemini's Pro model exposes only low and high variants, so `medium` and `high` both select the high variant there and only `low` selects the low variant. |
 | `STATE_DIR` | no | n/a | State directory from an interrupted run, to resume it. |
 
 ## Dependencies
 
 - Claude Code with subagent support. The adversarial critic runs as the `critic-<effort>` agent definition (`agents/` in this skill, linked into `~/.claude/agents/`) on `claude-sonnet-4-6`, fallback critics on `claude-opus-5`, and the apply agent on Sonnet by default (change via the `APPLY_MODEL` input).
 - The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration), pinned to the `gemini-3.1-pro` model. Must support `--output-format json`, `--json-schema`, and `--model`. The model exposes only `gemini-3.1-pro-low` and `gemini-3.1-pro-high` variants, not a tunable effort flag, so EFFORT selects between them. The document travels inside the prompt because this CLI ignores stdin in schema mode. Invoked with `NO_BROWSER=1 TERM=xterm-256color` so it does not try to open a browser or assume an unsupported terminal in a headless environment.
-- `jq`, to extract the Gemini and Grok results from their JSON envelopes.
-- The Grok CLI (`~/.local/bin/grok`, install with `curl -fsSL https://x.ai/cli/install.sh | bash`) only when `--grok` is used. Sign in with `grok login`; the stored token expires after 7 days, and `grok models` confirms the login non-interactively. Must support `--json-schema` (inline JSON), `--reasoning-effort`, `--sandbox`, and `--disallowed-tools`.
+- `jq`, to extract the Gemini result from its JSON envelope.
 - The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model at the configured reasoning effort, no API key required. Must support `--output-schema` and `-c model_reasoning_effort`. If Codex is not authenticated, the run stops as a failed loop instead of falling back, since re-authenticating is required before the critic can run at all.
 - GNU coreutils, for `timeout` on the external critic calls. Linux ships it; on macOS install with `brew install coreutils` (provides `timeout` and `gtimeout`). Without it, the external critic commands fail with "command not found".
 
