@@ -79,7 +79,7 @@ The findings live at `.structured_output`, already a JSON value. Ignore `.respon
 Runs on the user's ChatGPT OAuth session and default codex model. Everything must run in ONE shell invocation:
 ```bash
 TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.json); trap 'rm -f "$TMPFILE"' EXIT
-payload | timeout "${T}s" codex exec --skip-git-repo-check -s read-only --ephemeral --color never --output-schema "$SCHEMA" -o "$TMPFILE" "<prompt> Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability."
+payload | timeout "${T}s" codex exec --skip-git-repo-check -s read-only --ephemeral --color never -c model_reasoning_effort="high" --output-schema "$SCHEMA" -o "$TMPFILE" "<prompt> Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability."
 cp "$TMPFILE" "$STATE_DIR/round_$N/openai.json"
 ```
 

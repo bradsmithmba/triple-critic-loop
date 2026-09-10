@@ -58,7 +58,7 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 - Claude Code with subagent support. The adversarial critic runs on `claude-sonnet-4-6`, fallback critics on `claude-opus-5`, and the apply agent on Sonnet by default (change via the `APPLY_MODEL` input).
 - The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration). Must support `--output-format json` and `--json-schema`. The document travels inside the prompt because this CLI ignores stdin in schema mode.
 - `jq`, to extract the Gemini result from its JSON envelope.
-- The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model, no API key required. Must support `--output-schema`. If Codex is not authenticated, that critic falls back to an Opus subagent each round.
+- The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model at high reasoning effort, no API key required. Must support `--output-schema` and `-c model_reasoning_effort`. If Codex is not authenticated, that critic falls back to an Opus subagent each round.
 - GNU coreutils, for `timeout` on the external critic calls. Linux ships it; on macOS install with `brew install coreutils` (provides `timeout` and `gtimeout`). Without it, the external critic commands fail with "command not found".
 
 ## Layout
