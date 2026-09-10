@@ -51,7 +51,7 @@ Flags quoted from `help.txt`:
 
 ### Payload delivery
 
-Stdin is not honored as the payload. A test that asked Grok to "follow the instruction on stdin" produced a model turn that tried to locate the instruction with tools instead of reading it (three separate stdin-following attempts were run this session, session titles "Follow Instructions Provided via Standard Input" / "Follow stdin instruction generic command" / "Follow Instructions from Standard Input"). The referenced `live_test2.json` capture of that run's envelope is still **unconfirmed**: it was not found at the given scratchpad path or anywhere under this session's scratchpad tree during this review. The payload must go inline in the `-p` prompt, the same workaround already used for the Gemini critic (`agy`).
+Stdin is not honored as the payload. A test that asked Grok to "follow the instruction on stdin" produced a model turn that tried to locate the instruction with tools instead of reading it (three separate stdin-following attempts were run this session, session titles "Follow Instructions Provided via Standard Input" / "Follow stdin instruction generic command" / "Follow Instructions from Standard Input"). The orchestrator read that run's envelope directly before the recon worker's cleanup removed it: stopReason `cancelled`, num_turns 1, and the response text opening with "I'll start by reading the instruction on stdin", which is the model reaching for a tool instead of receiving the piped content. The payload must go inline in the `-p` prompt, the same workaround already used for the Gemini critic (`agy`).
 
 ### Structured output shape
 
