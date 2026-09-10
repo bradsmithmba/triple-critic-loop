@@ -29,6 +29,7 @@ At run start, unless resuming: `STATE_DIR=$(mktemp -d /tmp/triple_critic_XXXXXX)
 - `round_N/snapshot/`: copy of the target taken before the apply step.
 - `round_N/applied.diff`: `diff -ru round_N/snapshot <target>` after the apply step.
 - `round_N/notes.json`: fallback substitutions, halts, unapplied findings.
+- `round_N/gemini.stderr`, `round_N/openai.stderr`: captured stderr, used for failure classification.
 
 The state directory is never deleted. It is the audit trail, the input to the final report, and the resume point: when STATE_DIR is given, continue from the first round that has no `synthesis.json`. Later rounds read prior_findings and the previous diff from here rather than carrying them in context.
 </state>
@@ -70,7 +71,7 @@ The Gemini CLI ignores stdin in schema mode, so the payload goes inside the prom
 ```bash
 timeout "${T}s" env NO_BROWSER=1 TERM=xterm-256color ~/.local/bin/agy --sandbox --output-format json --json-schema "$SCHEMA" --print "<prompt>
 
-$(payload)" > "$STATE_DIR/round_$N/gemini.raw.json"
+$(payload)" > "$STATE_DIR/round_$N/gemini.raw.json" 2> "$STATE_DIR/round_$N/gemini.stderr"
 jq '.structured_output' "$STATE_DIR/round_$N/gemini.raw.json" > "$STATE_DIR/round_$N/gemini.json"
 ```
 The findings live at `.structured_output`, already a JSON value. Ignore `.response`; it is a string that can hold concatenated fragments. Do not summarize or filter. Output is written once at completion, not progressively, so the wall-clock timeout above is the only guard against a stuck run.
@@ -79,7 +80,7 @@ The findings live at `.structured_output`, already a JSON value. Ignore `.respon
 Runs on the user's ChatGPT OAuth session and default codex model. Everything must run in ONE shell invocation:
 ```bash
 TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.json); trap 'rm -f "$TMPFILE"' EXIT
-payload | timeout "${T}s" codex exec --skip-git-repo-check -s read-only --ephemeral --color never -c model_reasoning_effort="high" --output-schema "$SCHEMA" -o "$TMPFILE" "<prompt> Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability."
+payload | timeout "${T}s" codex exec --skip-git-repo-check -s read-only --ephemeral --color never -c model_reasoning_effort="high" --output-schema "$SCHEMA" -o "$TMPFILE" "<prompt> Perform a balanced system-level critique across architecture, reliability, security, performance, scalability, and operability." 2> "$STATE_DIR/round_$N/openai.stderr"
 cp "$TMPFILE" "$STATE_DIR/round_$N/openai.json"
 ```
 A nonzero exit with `$TMPFILE` absent or empty means the process died mid-stream, not that the model produced nothing: retry once with a fresh invocation before classifying the failure under external_critic_fallback. With reasoning summaries off by default, stderr goes flat for most of the run and only fills near the end, so the wall-clock timeout is the only guard here too.
@@ -88,7 +89,7 @@ A nonzero exit with `$TMPFILE` absent or empty means the process died mid-stream
 Follows critic_protocol; reads the target and context with its own tools and writes `round_N/claude.json`. Prompt suffix: "Assume the design will fail. Challenge every mitigation until proven sufficient. Do not soften findings." Pick the focus list for the document type and include it: for systems and code, race conditions, concurrency, security bypass, scale failure, hidden assumptions, week-one production failures; for product and process documents, unstated assumptions, missing failure paths, unowned decisions, unmeasurable success criteria, and contradictions with the reference context.
 
 ### external_critic_fallback
-An external critic fails when its command exits non-zero, times out, or its output is not usable per critic_protocol. Before substituting, classify the failure: if stderr or stdout matches an auth or quota signature, do not substitute, since the condition will recur every round and substituting a model does not fix the account; abort the run as failed_loop, naming the critic and the matched signature. Signature check: `grep -Eiq 'not authenticated|login required|invalid credentials|refresh token|invalid_grant|\b401\b|quota exceeded|rate limit|\b429\b|resource exhausted|usage limit'`. Any other failure (timeout, malformed output, empty findings, nonzero exit without that signature) takes the fallback path: immediately (without waiting for other critics) substitute a Claude subagent on `claude-opus-5`, passed explicitly, taking over that critic's prompt and role. Opus rather than Sonnet keeps the critic set model-diverse, since the adversarial critic is already Sonnet. If both external critics fail in the same round, do not substitute: abort with run_outcome failed_loop. Record every substitution or auth/quota abort in `notes.json`.
+An external critic fails when its command exits non-zero, times out, or its output is not usable per critic_protocol. Before substituting, classify the failure: if stderr matches an auth or quota signature, do not substitute, since the condition will recur every round and substituting a model does not fix the account; abort the run as failed_loop, naming the critic and the matched signature. Signature check: `grep -Eiq 'not authenticated|login required|invalid credentials|refresh token|invalid_grant|\b401\b|quota exceeded|rate limit|\b429\b|resource exhausted|usage limit' "$STATE_DIR/round_$N/<critic>.stderr"`. Any other failure (timeout, malformed output, empty findings, nonzero exit without that signature) takes the fallback path: immediately (without waiting for other critics) substitute a Claude subagent on `claude-opus-5`, passed explicitly, taking over that critic's prompt and role. Opus rather than Sonnet keeps the critic set model-diverse, since the adversarial critic is already Sonnet. If both external critics fail in the same round, do not substitute: abort with run_outcome failed_loop. Record every substitution or auth/quota abort in `notes.json`.
 
 ### apply agent (Claude subagent, model APPLY_MODEL, passed explicitly)
 Receives the target path and the list of fold_in findings: finding_id, affected_component, evidence, recommendation, and the merged recommendations of all source critics. For each finding it composes the minimal edit that implements the recommendation and applies it with exact-match edits, one finding at a time. It changes nothing outside the affected component, never touches reference documents, and reports each finding as applied or unapplied with a reason. It never spawns subagents.
