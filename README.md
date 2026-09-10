@@ -33,6 +33,12 @@ git clone <repo-url> ~/.claude/skills/triple-critic-loop
 
 Claude Code discovers it on next launch.
 
+Skills cannot bundle agent definitions, so the Claude adversarial critic ships as separate agent definitions the skill launches by name. Link them into your user agents directory:
+
+```bash
+mkdir -p ~/.claude/agents && ln -s ~/.claude/skills/triple-critic-loop/agents/critic-*.md ~/.claude/agents/
+```
+
 ## Invoke
 
 ```
@@ -56,7 +62,7 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 
 ## Dependencies
 
-- Claude Code with subagent support. The adversarial critic runs on `claude-sonnet-4-6`, fallback critics on `claude-opus-5`, and the apply agent on Sonnet by default (change via the `APPLY_MODEL` input).
+- Claude Code with subagent support. The adversarial critic runs as the `critic-<effort>` agent definition (`agents/` in this skill, linked into `~/.claude/agents/`) on `claude-sonnet-4-6`, fallback critics on `claude-opus-5`, and the apply agent on Sonnet by default (change via the `APPLY_MODEL` input).
 - The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration), pinned to the `gemini-3.1-pro` model. Must support `--output-format json`, `--json-schema`, and `--model`. The model exposes only `gemini-3.1-pro-low` and `gemini-3.1-pro-high` variants, not a tunable effort flag, so EFFORT selects between them. The document travels inside the prompt because this CLI ignores stdin in schema mode. Invoked with `NO_BROWSER=1 TERM=xterm-256color` so it does not try to open a browser or assume an unsupported terminal in a headless environment.
 - `jq`, to extract the Gemini result from its JSON envelope.
 - The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model at the configured reasoning effort, no API key required. Must support `--output-schema` and `-c model_reasoning_effort`. If Codex is not authenticated, the run stops as a failed loop instead of falling back, since re-authenticating is required before the critic can run at all.
@@ -68,6 +74,7 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 triple-critic-loop/
 ├── SKILL.md              # the skill definition (canonical)
 ├── findings.schema.json  # JSON schema every critic's output must match
+├── agents/                # critic-low/medium/high.md, linked into ~/.claude/agents/
 ├── versions/
 │   └── 1.0/SKILL.md      # originally published skill, preserved
 ├── README.md
