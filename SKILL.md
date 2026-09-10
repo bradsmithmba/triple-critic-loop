@@ -68,9 +68,9 @@ where `expand` cats a file or applies the directory expansion above. Quote every
 
 <agents>
 ### gemini (external)
-The Gemini CLI ignores stdin in schema mode, so the payload goes inside the prompt, and `--print` must be the last flag because it consumes the next token as its prompt. The Pro model exposes only `low` and `high` variants, not a tunable `--effort` flag alongside a fixed model, so EFFORT maps onto model selection instead; medium collapses onto low so the high override is a real step up from the default:
+The Gemini CLI ignores stdin in schema mode, so the payload goes inside the prompt, and `--print` must be the last flag because it consumes the next token as its prompt. The Pro model exposes only `low` and `high` variants, not a tunable `--effort` flag alongside a fixed model, so EFFORT maps onto model selection instead; low selects the low variant and medium or high selects the high variant, so the default runs the stronger critic:
 ```bash
-GEMINI_MODEL=$([ "$EFFORT" = high ] && echo gemini-3.1-pro-high || echo gemini-3.1-pro-low)
+GEMINI_MODEL=$([ "$EFFORT" = low ] && echo gemini-3.1-pro-low || echo gemini-3.1-pro-high)
 timeout "${T}s" env NO_BROWSER=1 TERM=xterm-256color ~/.local/bin/agy --sandbox --output-format json --json-schema "$SCHEMA" --model "$GEMINI_MODEL" --print "<prompt>
 
 $(payload)" > "$STATE_DIR/round_$N/gemini.raw.json" 2> "$STATE_DIR/round_$N/gemini.stderr"

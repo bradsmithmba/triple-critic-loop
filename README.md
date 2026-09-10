@@ -57,7 +57,7 @@ Or let Claude invoke it by intent (e.g. "run a triple-critic design review on th
 | `HIGH_THRESHOLD` | no | `50` | Score at or above which a finding with two-critic agreement is auto-applied. The scale is open-topped and can exceed 100 when all three critics agree. |
 | `LOW_THRESHOLD` | no | `33` | Score at or above which a finding is deferred rather than skipped. |
 | `APPLY_MODEL` | no | `sonnet` | Model for the single apply agent. It composes edits from the critics' recommendations, so it needs judgment; use `haiku` only for trivial documents. |
-| `EFFORT` | no | `medium` | Reasoning effort for all three critics: `low`, `medium`, or `high`. Gemini's Pro model exposes only low and high variants, so `medium` selects the low variant there. |
+| `EFFORT` | no | `medium` | Reasoning effort for all three critics: `low`, `medium`, or `high`. Gemini's Pro model exposes only low and high variants, so `medium` and `high` both select the high variant there and only `low` selects the low variant. |
 | `STATE_DIR` | no | n/a | State directory from an interrupted run, to resume it. |
 
 ## Dependencies
