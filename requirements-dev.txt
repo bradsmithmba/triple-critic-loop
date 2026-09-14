@@ -1,0 +1,4 @@
+# Schema validation helper and contract tests (no provider calls).
+jsonschema>=4,<5
+# Optional: bundled skill-creator quick_validate.py.
+PyYAML>=6,<7

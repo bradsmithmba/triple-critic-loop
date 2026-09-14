@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Triple critic loop v2.0 judgment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "findings",
+    "fix_order",
+    "ordering_reason"
+  ],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "finding_id",
+          "origin",
+          "source_item_ids",
+          "prior_finding_ids",
+          "title",
+          "root_cause",
+          "affected_component",
+          "evidence",
+          "severity",
+          "architectural_reversal",
+          "validity",
+          "consequence",
+          "remedy_assessment",
+          "disposition",
+          "disposition_reason",
+          "recommendation",
+          "acceptance_criteria",
+          "depends_on",
+          "edit_scope"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "review",
+              "judge"
+            ]
+          },
+          "source_item_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "prior_finding_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "root_cause": {
+            "type": "string",
+            "minLength": 1
+          },
+          "affected_component": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "file",
+                "location",
+                "quote"
+              ],
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "location": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "quote": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "At most 40 words, verbatim from the named frozen file."
+                }
+              }
+            },
+            "minItems": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "architectural_reversal": {
+            "type": "boolean"
+          },
+          "validity": {
+            "type": "string",
+            "minLength": 1
+          },
+          "consequence": {
+            "type": "string",
+            "minLength": 1
+          },
+          "remedy_assessment": {
+            "type": "string",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "fix_now",
+              "needs_decision",
+              "needs_verification",
+              "dismiss"
+            ]
+          },
+          "disposition_reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recommendation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "edit_scope": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "file",
+                "component"
+              ],
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "component": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "minItems": 0
+    },
+    "fix_order": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 0,
+      "uniqueItems": true
+    },
+    "ordering_reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

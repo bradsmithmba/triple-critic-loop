@@ -1,85 +1,109 @@
-# triple-critic-loop
+# triple-critic-loop v2.0
 
-The three main frontier models each have their own strengths and weaknesses. I started off using them to check and improve each other's work, but manually copying and pasting things back and forth so often was more than a little inefficient. I was tired of being the glue that held multiple models together. It seemed like I should be making them do all the work instead of me running back and forth between them. This loop is a result of that need.
+Three independent critics find problems. An evidence-based LLM judge decides which findings hold up and orders bounded fixes. One apply agent makes those changes in a private copy, and a fresh verifier checks the result before it reaches your document.
 
-This loop has an orchestrator that launches three sub agents with clean context, one each from Gemini, ChatGPT, and one from Anthropic that is set to be adversarial on purpose. These three agents act as critics to review whatever document or code you send to them. They very often have very different perspectives and having those different perspectives makes this loop much better at finding problems. The three agents report their findings back to the orchestrator. The orchestrator, which has all the relevant context, then ranks and scores these potential changes. Based on thresholds you set, the orchestrator then launches an agent to apply the fixes. This preserves the main orchestrator's context window. The loop then repeats three times or as many as you tell it to.
+I built the original loop to stop manually copying documents between models and reconciling their reviews. V2 keeps those independent perspectives and replaces weighted scoring and minimum vote counts with explicit judgment against the actual document.
 
-## What it does
+## What changed in v2
 
-Given a design document (or a directory of documents), the skill runs N review rounds. Each round:
+- **No scores or thresholds.** The judge assigns `fix_now`, `needs_decision`, `needs_verification`, or `dismiss`, with evidence-linked reasons and an ordered fix list.
+- **Single-critic discoveries can lead to fixes.** The judge must establish the defect and assess the remedy independently. Agreement is recorded for audit, not used as a gate.
+- **Anonymized judgment.** Provider and role identities are withheld; the judge gets the complete frozen target and reference documents.
+- **Verification after every apply, including the last round.** Fixes need observable acceptance criteria. Failed or uncertain verification discards the round's patch; earlier verified rounds stand.
+- **Clean reviews are valid.** Complete coverage and empty findings mean success, not a fallback trigger.
+- **Unresolved findings persist.** Deferred issues and unapplied fixes cannot disappear into an “already addressed” list or count as convergence.
+- **Recoverable phases.** Review, judgment, apply, verification, and publication have separate phase markers and hashes. V1 state is not compatible.
 
-1. Launches three independent critics in parallel:
-   - **Gemini** (external, via the Gemini CLI)
-   - **OpenAI** (external, via the Codex CLI on your ChatGPT OAuth session; balanced system-level critique: architecture, reliability, security, performance, scalability, operability)
-   - **Claude adversarial** (Claude subagent; assumes the design fails: race conditions, concurrency, security bypass, scale failure, hidden assumptions)
+The current root package is v2.0. `versions/1.0/SKILL.md` preserves the originally published skill. `versions/pre-2.0/` preserves the exact scored package immediately before this update. Historical copies are reference material; install the current root package for v2.
 
-   Every critic returns JSON validated against `findings.schema.json`, including a root cause and affected component per finding. An external critic that returns no findings is treated as failed, not as a clean review. For the OpenAI critic, a nonzero exit with no output file means the process died mid-stream; that gets one retry with a fresh invocation before it is treated as a failure. A failed critic is classified before any substitution: an authentication or quota failure (not authenticated, invalid credentials, quota exceeded, rate limit, and similar signatures) is not substituted, since the condition will recur every round, and the run stops as a failed loop naming the critic and the signature. Any other failure (timeout, malformed output, empty findings) is substituted with an Opus subagent taking over that critic's role, so the round still has three critics from at least two model families. If both external critics fail in the same round, the run stops as a failed loop.
-2. Merges findings that share a root cause and affected component, preserving every source critic and any disagreement between them.
-3. Scores every finding (severity x confidence x agreement x impact weight). Agreement is the number of critics that raised the finding.
-4. Applies eligible fixes: a finding is fixed only when at least two critics raised it and its score clears the threshold. A single critic can never trigger an edit, and a low-severity finding is fixed only when all three critics raised it. The orchestrator hands the eligible findings to one apply agent, which composes and applies the edits; critics never edit.
-5. Defers architectural reversals and conflicting recommendations for human review instead of applying them.
+## How a round works
 
-From round two onward, critics also receive the previous round's diff and verify those fixes before looking for new issues. The loop stops early when a round applies no fixes and no critical or high finding with two-critic agreement remains (convergence), or when such findings remain but cannot be auto-applied (stall).
+1. Freeze a consistent target/reference snapshot. Gemini, OpenAI balanced, and Claude adversarial review it independently.
+2. A fresh judge evaluates every anonymized finding and unresolved ledger item against the documents. It separates “is the defect real?” from “is this the right correction?”, merges duplicates, and orders approved fixes by consequence and prerequisites.
+3. One apply agent edits only approved components in a private working copy.
+4. A fresh verifier checks the original diagnosis, acceptance criteria, resulting document, and regressions. The orchestrator publishes only a verified patch after checking that the original files have not changed.
+5. Update the ledger and either repeat, converge, stall with unresolved work, or halt on failure. Reaching the round limit does not imply all issues are resolved.
 
-Every run writes a state directory (`/tmp/triple_critic_*`) holding raw critic output, the scored synthesis, a pre-apply snapshot, and a unified diff per round. It is kept after the run as the audit trail and can be passed back as `STATE_DIR` to resume an interrupted run. The final report gives the run outcome (completed, converged early, stalled, halted, or failed), findings by severity and score, applied changes per round, a severity curve across rounds, a scoring summary, and deferred architectural reversals.
+Architectural reversals always remain decisions for the user. Unresolved conflicting remedies and claims requiring outside evidence do not become automatic edits. There are no questions between rounds; decisions appear in the report.
 
 ## Install
 
-Standalone skill. Drop the skill folder into your skills directory:
+This package targets Claude Code and the external adapters documented in [references/external-critics.md](references/external-critics.md).
 
 ```bash
-git clone <repo-url> ~/.claude/skills/triple-critic-loop
+git clone https://github.com/bradsmithmba/triple-critic-loop.git ~/.claude/skills/triple-critic-loop
+mkdir -p ~/.claude/agents
+ln -s ~/.claude/skills/triple-critic-loop/agents/*.md ~/.claude/agents/
 ```
 
-Claude Code discovers it on next launch.
+If upgrading an existing clone, update its files and link the new `triple-critic-judge.md` and `triple-critic-verifier.md` definitions. Existing critic symlinks will read the updated definitions; do not overwrite unrelated agents. No global installation or account changes are made by editing this repository.
 
-Skills cannot bundle agent definitions, so the Claude adversarial critic ships as separate agent definitions the skill launches by name. Link them into your user agents directory:
+## Invoke and inputs
+
+```text
+/triple-critic-loop DOCUMENT_PATH=/absolute/path/to/spec.md LOOPS=3
+```
+
+| Input | Default | Meaning |
+|---|---|---|
+| `DOCUMENT_PATH` | Required | Text file, or directory of Markdown/text documents. |
+| `CONTEXT_PATHS` | None | Comma-separated absolute reference paths, read-only. |
+| `LOOPS` | `3` | Maximum review/apply rounds; final verification always runs. |
+| `EFFORT` | `medium` | Critic effort: low, medium, or high. |
+| `JUDGE_MODEL` | `opus` | Fresh judge, high effort. |
+| `APPLY_MODEL` | `sonnet` | Single apply agent. |
+| `VERIFY_MODEL` | `sonnet` | Fresh verifier, high effort. |
+| `STATE_DIR` | New temporary directory | Resume a compatible v2 run. |
+
+`HIGH_THRESHOLD` and `LOW_THRESHOLD` are removed and rejected with a migration message. Start a new v2 run rather than reusing a v1 state directory. Directory review covers `.md` and `.txt` files; this is not a repository-wide code modification skill.
+
+## Dependencies and data handling
+
+- Claude Code with the supplied agent definitions. Critic definitions retain `claude-sonnet-4-6`; judge and external-failure substitute default to `opus`; verifier/apply default to `sonnet`. Model availability and requested overrides are checked at run start.
+- The existing `~/.local/bin/agy` Gemini adapter with schema output. Low effort selects `gemini-3.1-pro-low`; medium/high select `gemini-3.1-pro-high`. Preflight installed support; the adapter is not interchangeable with arbitrary Gemini CLIs.
+- Codex CLI with authentication, stdin input, read-only execution, and schema output. It uses the configured default model and selected critic effort.
+- Bash, `jq`, and GNU `timeout` or `gtimeout` for the external adapters.
+- Python 3 and `jsonschema` for the artifact validation helper. Install `requirements-dev.txt` into your chosen virtual environment for development validation.
+
+Targets and reference documents are sent to external providers. As in v1, do not use the skill on credentials, PII, or data governed by residency requirements. State retains snapshots, findings, and diagnostics. Keep it private and copy it to durable storage if needed; temporary directories can be removed by the operating system.
+
+An auth/quota failure stops the run. One other external failure may use an Opus substitute; two external failures stop it. Judge/verifier failures are not silently bypassed. Actual substitutions and models appear in the report.
+
+## Report and state
+
+The report includes the state path, outcome, ranked unresolved findings by disposition, judge explanations, verified changes, unapplied/reverted changes, architectural decisions, and next steps. Per-round counts distinguish new, reopened, resolved, and outstanding findings.
+
+The state protocol is in [references/state.md](references/state.md). It is an orchestration contract followed by the skill, not a standalone workflow engine. The validation helper enforces JSON shape and local policy invariants; the orchestrator still checks source truth, coverage, cross-artifact consistency, file hashes, and publication.
+
+## Development checks
 
 ```bash
-mkdir -p ~/.claude/agents && ln -s ~/.claude/skills/triple-critic-loop/agents/critic-*.md ~/.claude/agents/
+python3 -m venv /tmp/triple-critic-dev
+/tmp/triple-critic-dev/bin/pip install -r requirements-dev.txt
+/tmp/triple-critic-dev/bin/python -m unittest discover -s tests -v
 ```
 
-## Invoke
+Validate an individual artifact:
 
+```bash
+python3 scripts/validate_artifact.py judgment.schema.json /absolute/path/to/judgment.json
 ```
-/triple-critic-loop
-```
 
-Or let Claude invoke it by intent (e.g. "run a triple-critic design review on this spec").
-
-## Inputs
-
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `DOCUMENT_PATH` | yes | n/a | Absolute path to the document or directory under review. |
-| `CONTEXT_PATHS` | no | n/a | Comma-separated reference docs the target must stay consistent with (read-only context). |
-| `LOOPS` | no | `3` | Maximum number of review rounds; the loop may stop early on convergence. |
-| `HIGH_THRESHOLD` | no | `50` | Score at or above which a finding with two-critic agreement is auto-applied. The scale is open-topped and can exceed 100 when all three critics agree. |
-| `LOW_THRESHOLD` | no | `33` | Score at or above which a finding is deferred rather than skipped. |
-| `APPLY_MODEL` | no | `sonnet` | Model for the single apply agent. It composes edits from the critics' recommendations, so it needs judgment; use `haiku` only for trivial documents. |
-| `EFFORT` | no | `medium` | Reasoning effort for all three critics: `low`, `medium`, or `high`. Gemini's Pro model exposes only low and high variants, so `medium` and `high` both select the high variant there and only `low` selects the low variant. |
-| `STATE_DIR` | no | n/a | State directory from an interrupted run, to resume it. |
-
-## Dependencies
-
-- Claude Code with subagent support. The adversarial critic runs as the `critic-<effort>` agent definition (`agents/` in this skill, linked into `~/.claude/agents/`) on `claude-sonnet-4-6`, fallback critics on `claude-opus-5`, and the apply agent on Sonnet by default (change via the `APPLY_MODEL` input).
-- The Gemini CLI for the Gemini critic (`~/.local/bin/agy` in the current configuration), pinned to the `gemini-3.1-pro` model. Must support `--output-format json`, `--json-schema`, and `--model`. The model exposes only `gemini-3.1-pro-low` and `gemini-3.1-pro-high` variants, not a tunable effort flag, so EFFORT selects between them. The document travels inside the prompt because this CLI ignores stdin in schema mode. Invoked with `NO_BROWSER=1 TERM=xterm-256color` so it does not try to open a browser or assume an unsupported terminal in a headless environment.
-- `jq`, to extract the Gemini result from its JSON envelope.
-- The Codex CLI for the OpenAI critic, signed in with ChatGPT OAuth (`codex login`; verify with `codex login status`). Uses your codex default model at the configured reasoning effort, no API key required. Must support `--output-schema` and `-c model_reasoning_effort`. If Codex is not authenticated, the run stops as a failed loop instead of falling back, since re-authenticating is required before the critic can run at all.
-- GNU coreutils, for `timeout` on the external critic calls. Linux ships it; on macOS install with `brew install coreutils` (provides `timeout` and `gtimeout`). Without it, the external critic commands fail with "command not found".
+Offline tests exercise clean reviews, singleton approval, reversal boundaries, provenance uniqueness, dependencies, acceptance criteria, and verification evidence. They do not establish live model quality or adapter availability. Before tuning judge prompts or model choices, compare recorded reviews on seeded defects and clean controls, inspecting unnecessary edits and missed defects.
 
 ## Layout
 
-```
-triple-critic-loop/
-├── SKILL.md              # the skill definition (canonical)
-├── findings.schema.json  # JSON schema every critic's output must match
-├── agents/                # critic-low/medium/high.md, linked into ~/.claude/agents/
-├── versions/
-│   └── 1.0/SKILL.md      # originally published skill, preserved
-├── README.md
-├── LICENSE
-└── .gitignore
+```text
+SKILL.md                       Current v2.0 workflow
+findings.schema.json           Critic output contract
+judgment.schema.json           Judge dispositions and ordered fixes
+verification.schema.json       Independent verification contract
+agents/                        Critics, judge, verifier
+references/                    Judge rubric, adapters, state/recovery
+scripts/validate_artifact.py    JSON and local policy validation
+tests/test_contracts.py         Offline contract tests
+requirements-dev.txt           Validation dependencies
+versions/                      Historical scored skills
 ```
 
 ## License

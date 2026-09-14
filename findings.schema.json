@@ -1,10 +1,39 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "triple-critic findings",
+  "title": "Triple critic loop v2.0 findings",
   "type": "object",
   "additionalProperties": false,
-  "required": ["findings"],
+  "required": [
+    "review_status",
+    "reviewed_files",
+    "limitations",
+    "findings"
+  ],
   "properties": {
+    "review_status": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "incomplete"
+      ]
+    },
+    "reviewed_files": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 0
+    },
     "findings": {
       "type": "array",
       "items": {
@@ -23,39 +52,91 @@
           "recommendation"
         ],
         "properties": {
-          "finding_id": { "type": "string" },
-          "title": { "type": "string" },
-          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
-          "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+          "finding_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
           "impact_dimensions": {
             "type": "array",
-            "minItems": 1,
             "items": {
               "type": "string",
-              "enum": ["correctness", "security", "reliability", "scalability", "operability", "maintainability", "clarity"]
-            }
+              "enum": [
+                "correctness",
+                "security",
+                "reliability",
+                "scalability",
+                "operability",
+                "maintainability",
+                "clarity"
+              ]
+            },
+            "minItems": 1,
+            "uniqueItems": true
           },
-          "architectural_reversal": { "type": "boolean" },
+          "architectural_reversal": {
+            "type": "boolean"
+          },
           "root_cause": {
             "type": "string",
-            "description": "One phrase naming the underlying defect, not the symptom."
+            "minLength": 1
           },
           "affected_component": {
             "type": "string",
-            "description": "The section heading (and file name when the target is a directory) the finding is raised against."
+            "minLength": 1
           },
           "evidence": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["location", "quote"],
+            "required": [
+              "file",
+              "location",
+              "quote"
+            ],
             "properties": {
-              "location": { "type": "string" },
-              "quote": { "type": "string", "description": "At most 40 words, verbatim from the target." }
+              "file": {
+                "type": "string",
+                "minLength": 1
+              },
+              "location": {
+                "type": "string",
+                "minLength": 1
+              },
+              "quote": {
+                "type": "string",
+                "minLength": 1,
+                "description": "At most 40 words, verbatim from the named frozen file."
+              }
             }
           },
-          "recommendation": { "type": "string" }
+          "recommendation": {
+            "type": "string",
+            "minLength": 1
+          }
         }
-      }
+      },
+      "minItems": 0
     }
   }
 }

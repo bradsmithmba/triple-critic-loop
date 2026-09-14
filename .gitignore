@@ -3,3 +3,8 @@
 
 # Claude Code local session state
 .claude/settings.local.json
+
+# Python validation artifacts
+__pycache__/
+*.pyc
+.venv/
