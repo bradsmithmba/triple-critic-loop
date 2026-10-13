@@ -1,7 +1,7 @@
 ---
 name: critic-medium
 description: Adversarial document critic for triple-critic-loop at medium effort.
-model: claude-sonnet-4-6
+model: claude-sonnet-5-5
 effort: medium
 tools: Read, Glob, Grep
 ---

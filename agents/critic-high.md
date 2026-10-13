@@ -1,7 +1,7 @@
 ---
 name: critic-high
 description: Adversarial document critic for triple-critic-loop at high effort.
-model: claude-sonnet-4-6
+model: claude-sonnet-5-5
 effort: high
 tools: Read, Glob, Grep
 ---

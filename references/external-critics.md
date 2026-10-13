@@ -45,7 +45,7 @@ The final `-` explicitly selects stdin for the complete instructions and payload
 
 ## Claude adversarial
 
-Launch `critic-$EFFORT`, whose definitions specify `claude-sonnet-4-6` and effort. Missing definitions fail preflight rather than falling back to general-purpose. For systems documents, focus on race conditions, security bypasses, scale assumptions, and production failure paths. For product/process documents, focus on unstated assumptions, missing failure paths, unowned decisions, unmeasurable success criteria, and reference contradictions. Challenge mitigations without manufacturing findings. Read only frozen input files or supplied payload, and return JSON without writing files.
+Launch `critic-$EFFORT`, whose definitions specify `claude-sonnet-5-5` and effort. Missing definitions fail preflight rather than falling back to general-purpose. For systems documents, focus on race conditions, security bypasses, scale assumptions, and production failure paths. For product/process documents, focus on unstated assumptions, missing failure paths, unowned decisions, unmeasurable success criteria, and reference contradictions. Challenge mitigations without manufacturing findings. Read only frozen input files or supplied payload, and return JSON without writing files.
 
 ## Failures
 
