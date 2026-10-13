@@ -6,16 +6,16 @@ These adapters preserve the existing repository's Claude Code, agy, and Codex se
 
 Use Bash for the snippets. Define `SKILL_DIR` as this skill's actual absolute directory, `SCHEMA="$SKILL_DIR/findings.schema.json"`, and `ROUND_DIR="$STATE_DIR/round_$N"`. `PAYLOAD_FILE` is the persisted UTF-8 critic input: shared critic prompt, original-path-labeled frozen target/reference contents, manifest, and optional verified history. Build it with file APIs or quoted variables; never interpolate document content as shell code. Each role receives the same documents but its own prompt suffix.
 
-Choose the available GNU `timeout` or `gtimeout` command as `TIMEOUT_BIN`; require it before launching. Set T to 180 seconds plus 30 seconds per started 100KB beyond 200KB of input. Enforce this wall-clock bound. Large input may exceed Gemini's command argument limit or model context: fail with an input-size limitation rather than silently truncate.
+Choose the available GNU `timeout` or `gtimeout` command as `TIMEOUT_BIN`; require it before launching. Set T to 300 seconds plus 30 seconds per started 100KB beyond 200KB of input. Enforce this wall-clock bound. Large input may exceed Gemini's command argument limit or model context: fail with an input-size limitation rather than silently truncate.
 
 Subagent JSON is returned to the orchestrator and captured there. All outputs must pass findings.schema.json, exact reviewed-file coverage, and evidence checks. `review_status: incomplete`, nonempty limitations, missing coverage, nonzero exits, timeouts, or invalid output are failures. `complete` with empty findings and complete coverage is success.
 
 ## Gemini
 
-Keep the existing agy model mapping: low → `gemini-3.1-pro-low`; medium/high → `gemini-3.1-pro-high`. The configured adapter supplies the payload through the final `--print` argument. Verify that this installation supports these variants and flags; this reference does not assert that every Gemini CLI has this interface.
+The agy model is always `gemini-3.8-flash-high`, independent of EFFORT, because lower Flash variants review too leniently. Gemini 3.1 Pro is no longer offered by agy; confirm the selected ID appears in `agy models` during preflight. The configured adapter supplies the payload through the final `--print` argument. Verify that this installation supports these variants and flags; this reference does not assert that every Gemini CLI has this interface.
 
 ```bash
-GEMINI_MODEL=$([ "$EFFORT" = low ] && echo gemini-3.1-pro-low || echo gemini-3.1-pro-high)
+GEMINI_MODEL=gemini-3.8-flash-high
 "$TIMEOUT_BIN" "${T}s" env NO_BROWSER=1 TERM=xterm-256color \
   ~/.local/bin/agy --sandbox --output-format json --json-schema "$SCHEMA" \
   --model "$GEMINI_MODEL" --print "$(cat "$PAYLOAD_FILE")" \
@@ -28,14 +28,18 @@ Run where a nonzero exit can be captured (do not let shell errexit bypass classi
 
 ## OpenAI balanced
 
-Use the user's authenticated Codex session and configured default model, recording the effective model from events when available. Add a balanced critique suffix covering architecture, reliability, security, performance, scalability, and operability where relevant to the document. Run in one Bash invocation, capture the process status before copying output, and use a fresh temporary output file for every attempt:
+Use the user's authenticated Codex session and configured default model, recording the effective model from events when available. Add a balanced critique suffix covering architecture, reliability, security, performance, scalability, and operability where relevant to the document. Run in one Bash invocation, capture the process status before copying output, and use a fresh temporary output file for every attempt.
+
+OpenAI strict structured outputs reject `uniqueItems` (400 `invalid_json_schema`), so Codex receives a copy of the schema with that keyword removed, derived at run time so it cannot drift. Uniqueness is still enforced when the orchestrator validates the output against the full `findings.schema.json`.
 
 ```bash
 TMPFILE=$(mktemp /tmp/triple_critic_openai_XXXXXX.json)
+CODEX_SCHEMA="$ROUND_DIR/findings.codex.schema.json"
 trap 'rm -f "$TMPFILE"' EXIT
+jq 'walk(if type=="object" then del(.uniqueItems) else . end)' "$SCHEMA" > "$CODEX_SCHEMA"
 "$TIMEOUT_BIN" "${T}s" codex exec --skip-git-repo-check -s read-only \
   --ephemeral --color never -c model_reasoning_effort="$EFFORT" --json \
-  --output-schema "$SCHEMA" -o "$TMPFILE" - \
+  --output-schema "$CODEX_SCHEMA" -o "$TMPFILE" - \
   < "$PAYLOAD_FILE" > "$ROUND_DIR/openai.events.jsonl" 2> "$ROUND_DIR/openai.stderr"
 OPENAI_EXIT=$?
 cp "$TMPFILE" "$ROUND_DIR/openai.json"

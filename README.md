@@ -60,7 +60,7 @@ If upgrading an existing clone, update its files and link the new `triple-critic
 ## Dependencies and data handling
 
 - Claude Code with the supplied agent definitions. Critic definitions retain `claude-sonnet-5-5`; judge and external-failure substitute default to `opus`; verifier/apply default to `sonnet`. Model availability and requested overrides are checked at run start.
-- The existing `~/.local/bin/agy` Gemini adapter with schema output. Low effort selects `gemini-3.1-pro-low`; medium/high select `gemini-3.1-pro-high`. Preflight installed support; the adapter is not interchangeable with arbitrary Gemini CLIs.
+- The existing `~/.local/bin/agy` Gemini adapter with schema output. It always uses `gemini-3.8-flash-high`, independent of effort. Preflight installed support; the adapter is not interchangeable with arbitrary Gemini CLIs.
 - Codex CLI with authentication, stdin input, read-only execution, and schema output. It uses the configured default model and selected critic effort.
 - Bash, `jq`, and GNU `timeout` or `gtimeout` for the external adapters.
 - Python 3 and `jsonschema` for the artifact validation helper. Install `requirements-dev.txt` into your chosen virtual environment for development validation.
