@@ -12,10 +12,10 @@ Subagent JSON is returned to the orchestrator and captured there. All outputs mu
 
 ## Gemini
 
-The agy model is always `gemini-3.8-flash-high`, independent of EFFORT, because lower Flash variants review too leniently. Gemini 3.1 Pro is no longer offered by agy; confirm the selected ID appears in `agy models` during preflight. The configured adapter supplies the payload through the final `--print` argument. Verify that this installation supports these variants and flags; this reference does not assert that every Gemini CLI has this interface.
+The agy model is always `gemini-3.8-flash-medium`, independent of EFFORT. The high variant took up to 271s on a 25KB payload, too close to the timeout. Gemini 3.1 Pro is no longer offered by agy; confirm the selected ID appears in `agy models` during preflight. The configured adapter supplies the payload through the final `--print` argument. Verify that this installation supports these variants and flags; this reference does not assert that every Gemini CLI has this interface.
 
 ```bash
-GEMINI_MODEL=gemini-3.8-flash-high
+GEMINI_MODEL=gemini-3.8-flash-medium
 "$TIMEOUT_BIN" "${T}s" env NO_BROWSER=1 TERM=xterm-256color \
   ~/.local/bin/agy --sandbox --output-format json --json-schema "$SCHEMA" \
   --model "$GEMINI_MODEL" --print "$(cat "$PAYLOAD_FILE")" \
